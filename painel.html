@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Painel VSCO</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --txt: #1d2330; --mute: #69707d; --borda: #dde0e6;
+    --campo: #ffffff; --acento: #2f6fed; --acento-txt: #ffffff; --ok: #1f8a4c; --aviso: #b26b00;
+    --erro: #c53030; --log-bg: #11151c; --log-txt: #d7dde8; --log-mute: #7d8595;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1218; --card: #171b23; --txt: #e6e9ef; --mute: #939aa7; --borda: #2a303b;
+      --campo: #11151c; --acento: #5b8cff; --acento-txt: #0b1020; --ok: #4cc27f; --aviso: #e0a33a;
+      --erro: #f06a6a; --log-bg: #0b0e13;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--txt);
+         font: 15px/1.45 "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: var(--mute); margin: 0 0 12px; }
+  .grade { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--borda); border-radius: 10px; padding: 16px; }
+  .inteiro { grid-column: 1 / -1; }
+  @media (max-width: 800px) { .grade { grid-template-columns: 1fr; } }
+  label { display: block; font-size: 13px; color: var(--mute); margin: 10px 0 4px; }
+  input[type=text], input[type=number], select, textarea {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--borda); border-radius: 7px;
+    background: var(--campo); color: var(--txt); font: inherit; }
+  textarea { font: 13px/1.4 Consolas, monospace; resize: vertical; min-height: 120px; }
+  .linha { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .linha > input[type=text] { flex: 1; min-width: 180px; }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0 12px; }
+  button { font: inherit; padding: 8px 14px; border-radius: 7px; border: 1px solid var(--borda);
+           background: var(--campo); color: var(--txt); cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--acento); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primario { background: var(--acento); border-color: var(--acento); color: var(--acento-txt); font-weight: 600; }
+  button.perigo { border-color: var(--erro); color: var(--erro); }
+  .abas { display: flex; border: 1px solid var(--borda); border-radius: 8px; overflow: hidden; }
+  .abas button { flex: 1; border: 0; border-radius: 0; background: transparent; }
+  .abas button + button { border-left: 1px solid var(--borda); }
+  .abas button.ativa { background: var(--acento); color: var(--acento-txt); font-weight: 600; }
+  .dica { font-size: 13px; color: var(--mute); margin: 8px 0 0; }
+  .check { display: flex; gap: 8px; align-items: center; margin: 8px 0 0; color: var(--txt); font-size: 14px; }
+  details summary { cursor: pointer; color: var(--mute); font-size: 14px; margin-top: 14px; }
+  .acoes { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+  .pilula { padding: 5px 12px; border-radius: 999px; font-size: 13px; font-weight: 600;
+            border: 1px solid var(--borda); background: var(--card); }
+  .pilula.rodando { color: var(--acento); border-color: var(--acento); }
+  .pilula.ok { color: var(--ok); border-color: var(--ok); }
+  .pilula.erro { color: var(--erro); border-color: var(--erro); }
+  .caminho { font: 13px Consolas, monospace; word-break: break-all; }
+  .numeros { display: flex; gap: 20px; margin-top: 12px; font-size: 13px; color: var(--mute); flex-wrap: wrap; }
+  .numeros b { color: var(--txt); font-size: 15px; }
+  #log { background: var(--log-bg); color: var(--log-txt); border-radius: 8px; padding: 12px;
+         height: 440px; overflow: auto; margin: 0; font: 12.5px/1.45 Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+  #log .t { color: #8fb4ff; font-weight: 700; }
+  #log .a { color: #f0b54a; }
+  #log .e { color: #ff7b7b; font-weight: 600; }
+  #log .p { color: #7ee2a8; }
+  #log .m { color: var(--log-mute); }
+  #msg { min-height: 20px; font-size: 14px; margin-top: 10px; }
+  #msg.erro { color: var(--erro); } #msg.ok { color: var(--ok); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Painel VSCO</h1>
+    <span id="status" class="pilula">Carregando…</span>
+  </header>
+
+  <div class="grade">
+    <section class="card">
+      <h2>Onde salvar</h2>
+      <div class="caminho" id="pastaAtual">…</div>
+      <label for="pasta">Trocar pasta padrão</label>
+      <div class="linha">
+        <input type="text" id="pasta" placeholder="Ex.: F:\Fotos VSCO">
+        <button id="btnSalvarPasta">Salvar</button>
+      </div>
+      <div class="acoes">
+        <button id="btnEscolher">Escolher pasta…</button>
+        <button id="btnAbrir">Abrir no Explorer</button>
+      </div>
+      <p class="dica">Pode trocar a qualquer momento, inclusive durante um download: vale a partir do próximo perfil.</p>
+      <div class="numeros">
+        <span>Perfis no registro<br><b id="registro">–</b></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>O que baixar</h2>
+      <div class="abas" id="abas">
+        <button data-modo="perfil">Um perfil</button>
+        <button data-modo="pesquisa">Pesquisa</button>
+        <button data-modo="lista">Lista</button>
+      </div>
+
+      <div data-para="perfil">
+        <label for="alvoPerfil">Username ou link do perfil</label>
+        <input type="text" id="alvoPerfil" placeholder="Ex.: isahevangelista ou https://vsco.co/isahevangelista/gallery">
+      </div>
+
+      <div data-para="pesquisa">
+        <label for="alvoPesquisa">Termo de pesquisa</label>
+        <input type="text" id="alvoPesquisa" placeholder="Ex.: isabela">
+      </div>
+
+      <div data-para="lista">
+        <label for="arquivoLista">Carregar de um arquivo .txt da pasta do projeto</label>
+        <select id="arquivoLista"><option value="">— escolha —</option></select>
+        <label for="lista">Itens (um por linha; pode editar à vontade) — <span id="contaLista">0 itens</span></label>
+        <textarea id="lista" rows="7" placeholder="Isabela&#10;Isabella&#10;Izabela"></textarea>
+        <div class="cols">
+          <div>
+            <label for="como">Usar cada linha como</label>
+            <select id="como">
+              <option value="pesquisa">termo de pesquisa</option>
+              <option value="perfil">username exato</option>
+            </select>
+          </div>
+          <div>
+            <label for="inicio">Começar do item</label>
+            <input type="number" id="inicio" min="1" value="1">
+          </div>
+        </div>
+      </div>
+
+      <div data-para="pesquisa lista" id="blocoN">
+        <label for="n">Perfis novos por pesquisa</label>
+        <input type="number" id="n" min="1" value="10">
+      </div>
+
+      <details>
+        <summary>Opções avançadas</summary>
+        <div class="cols">
+          <div>
+            <label for="rps">Requisições por segundo</label>
+            <input type="number" id="rps" min="0" step="0.1" value="1.5">
+          </div>
+          <div>
+            <label for="pausa">Pausa no bloqueio (min)</label>
+            <input type="number" id="pausa" min="0" step="1" value="5">
+          </div>
+        </div>
+        <label for="subpasta">Subpasta dentro da pasta padrão (opcional)</label>
+        <input type="text" id="subpasta" placeholder="Ex.: busca_isabela — vazio = uma pasta por perfil/pesquisa">
+        <label class="check"><input type="checkbox" id="original"> Resolução original (bem maior que ~300 px)</label>
+        <label class="check"><input type="checkbox" id="forcar"> Baixar de novo perfis que já estão no registro</label>
+        <label class="check"><input type="checkbox" id="links"> Só gerar links.txt, sem baixar</label>
+      </details>
+
+      <div class="acoes">
+        <button class="primario" id="btnIniciar">▶ Iniciar</button>
+        <button id="btnPararDepois" hidden>Parar após o item atual</button>
+        <button class="perigo" id="btnParar" disabled>■ Parar agora</button>
+      </div>
+      <div id="msg"></div>
+    </section>
+
+    <section class="card inteiro">
+      <div class="linha" style="justify-content: space-between; margin-bottom: 10px;">
+        <h2 style="margin: 0;">Andamento</h2>
+        <div class="linha">
+          <label class="check" style="margin: 0;"><input type="checkbox" id="rolar" checked> Rolar automaticamente</label>
+          <button id="btnLimpar">Limpar tela</button>
+        </div>
+      </div>
+      <pre id="log"></pre>
+    </section>
+  </div>
+</main>
+
+<script>
+const TOKEN = "__TOKEN__";
+const $ = (id) => document.getElementById(id);
+const CAMPOS = ["alvoPerfil", "alvoPesquisa", "lista", "como", "inicio", "n", "rps", "pausa", "subpasta", "original", "forcar", "links"];
+let modo = "pesquisa", pos = 0, rodando = false;
+
+// ---------- memória do formulário (só conveniência; funciona sem)
+function salvarForm() {
+  try {
+    const dados = { modo };
+    for (const c of CAMPOS) dados[c] = $(c).type === "checkbox" ? $(c).checked : $(c).value;
+    localStorage.setItem("painelVsco", JSON.stringify(dados));
+  } catch (e) {}
+}
+function carregarForm() {
+  try {
+    const dados = JSON.parse(localStorage.getItem("painelVsco") || "{}");
+    for (const c of CAMPOS) if (c in dados) $(c).type === "checkbox" ? ($(c).checked = dados[c]) : ($(c).value = dados[c]);
+    if (dados.modo) modo = dados.modo;
+  } catch (e) {}
+}
+
+// ---------- abas
+function mostrarModo() {
+  document.querySelectorAll("#abas button").forEach(b => b.classList.toggle("ativa", b.dataset.modo === modo));
+  document.querySelectorAll("[data-para]").forEach(el => {
+    let visivel = el.dataset.para.split(" ").includes(modo);
+    if (el.id === "blocoN" && modo === "lista") visivel = $("como").value === "pesquisa";
+    el.hidden = !visivel;
+  });
+}
+document.querySelectorAll("#abas button").forEach(b => b.onclick = () => { modo = b.dataset.modo; mostrarModo(); salvarForm(); });
+
+// ---------- comunicação
+async function post(url, corpo) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "X-Token": TOKEN },
+                               body: JSON.stringify(corpo || {}) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.erro || `HTTP ${r.status}`);
+  return j;
+}
+function mensagem(texto, tipo) { $("msg").textContent = texto || ""; $("msg").className = tipo || ""; }
+async function acao(fn, okTexto) {
+  try { const r = await fn(); if (okTexto) mensagem(okTexto, "ok"); return r; }
+  catch (e) { mensagem(e.message, "erro"); }
+}
+
+// ---------- pasta
+$("btnSalvarPasta").onclick = () => acao(async () => {
+  const r = await post("/api/pasta", { caminho: $("pasta").value });
+  $("pasta").value = ""; mensagem("Pasta salva: " + r.pasta, "ok"); atualizar();
+});
+$("pasta").onkeydown = (e) => { if (e.key === "Enter") $("btnSalvarPasta").click(); };
+$("btnEscolher").onclick = () => acao(async () => {
+  mensagem("A janela de seleção abriu (pode estar atrás do navegador)…");
+  const r = await post("/api/escolher-pasta");
+  mensagem(r.pasta ? "Pasta salva: " + r.pasta : "Nenhuma pasta escolhida.", r.pasta ? "ok" : "");
+  atualizar();
+});
+$("btnAbrir").onclick = () => acao(() => post("/api/abrir-pasta"));
+
+// ---------- listas
+async function carregarListas() {
+  const r = await fetch("/api/listas").then(r => r.json()).catch(() => []);
+  const sel = $("arquivoLista");
+  for (const l of r) sel.add(new Option(`${l.nome} (${l.itens} itens)`, l.nome));
+}
+$("arquivoLista").onchange = () => acao(async () => {
+  if (!$("arquivoLista").value) return;
+  const r = await fetch("/api/lista?nome=" + encodeURIComponent($("arquivoLista").value)).then(r => r.json());
+  $("lista").value = r.texto || ""; $("inicio").value = 1; contarLista(); salvarForm();
+});
+function itensLista() { return $("lista").value.split(/\r?\n/).map(s => s.trim()).filter(s => s && !s.startsWith("#")); }
+function contarLista() { const n = itensLista().length; $("contaLista").textContent = n + (n === 1 ? " item" : " itens"); }
+$("lista").oninput = contarLista;
+$("como").onchange = mostrarModo;
+
+// ---------- iniciar / parar
+$("btnIniciar").onclick = () => acao(async () => {
+  const cfg = { modo };
+  for (const c of CAMPOS) cfg[c] = $(c).type === "checkbox" ? $(c).checked : $(c).value;
+  cfg.alvo = modo === "perfil" ? cfg.alvoPerfil : cfg.alvoPesquisa;
+  salvarForm();
+  await post("/api/iniciar", cfg);
+  mensagem("");
+  atualizar();
+});
+$("btnParar").onclick = () => acao(() => post("/api/parar", { depois: false }));
+$("btnPararDepois").onclick = () => acao(() => post("/api/parar", { depois: true }));
+document.querySelectorAll("input, select, textarea").forEach(el => el.addEventListener("change", salvarForm));
+
+// ---------- log
+const log = $("log");
+let linhaAtual = null;
+function classe(t) {
+  if (/^(#####|=====)/.test(t)) return "t";
+  if (/\*\*\*|BLOQUEADO|erro|Erro|falhou/.test(t)) return "e";
+  if (/^\s*!!!|aviso|>>>|pulado/.test(t)) return "a";
+  if (/^\s*\[\d+\/\d+\]/.test(t)) return "p";
+  if (/^\s*página \d+:/.test(t)) return "m";
+  return "";
+}
+function novaLinha(t) {
+  const d = document.createElement("div");
+  d.textContent = t || "\u00a0";
+  const c = classe(t); if (c) d.className = c;
+  return d;
+}
+function anexar(dados) {
+  if (dados.desde !== pos) { log.textContent = ""; linhaAtual = null; }
+  if (linhaAtual) { linhaAtual.remove(); linhaAtual = null; }
+  const frag = document.createDocumentFragment();
+  for (const t of dados.linhas) frag.appendChild(novaLinha(t));
+  log.appendChild(frag);
+  if (dados.atual) { linhaAtual = novaLinha(dados.atual); log.appendChild(linhaAtual); }
+  while (log.childElementCount > 4000) log.firstChild.remove();
+  pos = dados.fim;
+}
+$("btnLimpar").onclick = () => { log.textContent = ""; linhaAtual = null; };
+
+// ---------- estado
+function mostrarEstado(e) {
+  rodando = e.rodando;
+  const st = $("status");
+  if (e.rodando) {
+    const item = e.item && e.item.n > 1 ? ` — item ${e.item.i}/${e.item.n}` : "";
+    st.textContent = (e.parando ? "Parando" : "Baixando") + item + ` · ${e.decorrido}`;
+    st.className = "pilula rodando";
+  } else if (e.codigo === null || e.codigo === undefined) {
+    st.textContent = "Pronto"; st.className = "pilula";
+  } else if (e.codigo === 0) {
+    st.textContent = `Concluído · ${e.decorrido}`; st.className = "pilula ok";
+  } else {
+    const txt = { 3: "Bloqueado pelo site", 130: "Parado", 1: "Terminou com erro" }[e.codigo] || `Terminou (código ${e.codigo})`;
+    st.textContent = txt; st.className = "pilula " + (e.codigo === 130 ? "" : "erro");
+  }
+  $("pastaAtual").textContent = e.pasta ? e.pasta : `(nenhuma definida — usando ${e.pasta_efetiva})`;
+  $("registro").textContent = e.registro.toLocaleString("pt-BR");
+  $("btnIniciar").disabled = e.rodando;
+  $("btnParar").disabled = !e.rodando;
+  $("btnPararDepois").hidden = !(e.rodando && e.item && e.item.n > 1);
+  $("btnPararDepois").disabled = !!e.parando;
+}
+let ocupado = false;
+async function atualizar() {
+  if (ocupado) return;
+  ocupado = true;
+  try {
+    const e = await fetch(`/api/estado?desde=${pos}`).then(r => r.json());
+    const noFim = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    anexar(e.log);
+    mostrarEstado(e);
+    if ($("rolar").checked && noFim) log.scrollTop = log.scrollHeight;
+  } catch (err) {
+    $("status").textContent = "Painel desconectado (a janela do painel foi fechada?)";
+    $("status").className = "pilula erro";
+  } finally { ocupado = false; }
+}
+
+carregarForm(); mostrarModo(); contarLista(); carregarListas(); atualizar();
+setInterval(atualizar, 800);
+</script>
+</body>
+</html>

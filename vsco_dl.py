@@ -1,0 +1,650 @@
+"""
+Baixa todas as fotos/vídeos de uma galeria pública do VSCO (por padrão em baixa qualidade, ~300 px de largura).
+
+Como o site funciona (e por que não precisamos rolar a página):
+  1. GET https://vsco.co/<user>/gallery devolve o HTML com `window.__PRELOADED_STATE__`,
+     um JSON contendo: o site_id do perfil, um token público anônimo (users.currentUser.tkn)
+     e as primeiras 14 mídias + `nextCursor`. Essa visita também seta o cookie `vs_app_id`.
+  2. O "scroll infinito" só chama
+       GET /api/3.0/medias/profile?site_id=<id>&limit=<n>&cursor=<cursor>
+     com `Authorization: Bearer <tkn>` + o cookie acima (sem o cookie o Cloudflare devolve 403).
+     A resposta traz `media[]` e `next_cursor` (ausente na última página).
+  3. Cada imagem tem `responsive_url` (im.vsco.co/...jpg). Sem o parâmetro `?w=` ela redireciona
+     para img.vsco.co com o arquivo ORIGINAL (tamanho == image_meta.fileSize). Com `?w=<n>` o CDN
+     redimensiona para a faixa de tamanho mais próxima (pode vir um pouco maior que o pedido, ex.:
+     w=300 -> 321x480). Por padrão usamos w=300 (~25 KB por foto).
+  4. Cada perfil baixado é gravado em perfis_acessados.txt (ver registro_perfis.py); perfis que já
+     estão lá são pulados nas próximas execuções.
+
+Cuidados com o firewall (Cloudflare) do VSCO:
+  - Ritmo global (--rps): TODAS as requisições (página, API, fotos), de todas as threads, passam por
+    um único limitador (RITMO). O padrão é 1,5 requisição por segundo; 0 = sem limite.
+  - Bloqueio: se vier a página "Sorry, you have been blocked" (ou um desafio/limite do Cloudflare),
+    tudo pausa na hora (o curl em andamento é encerrado) por --pausa-bloqueio minutos (padrão 5) e
+    então sai UMA requisição de teste. Se passar, foi uma recusa isolada e o download continua; se
+    for recusada de novo, tudo para (exceção Bloqueado, código de saída 3). Nada do perfil em
+    andamento entra no registro, e os arquivos já baixados são pulados na próxima execução.
+  - Conexão reaproveitada: as fotos de um perfil são baixadas por UM processo curl, em série, na
+    mesma conexão (keep-alive), em vez de um processo e uma conexão nova por foto.
+
+Uso:
+  python vsco_dl.py isahevangelista
+  python vsco_dl.py https://vsco.co/isahevangelista/gallery -o fotos --rps 1
+  python vsco_dl.py isahevangelista --links-only     # só gera links.txt (p/ wget -i links.txt)
+  python vsco_dl.py isahevangelista --original       # resolução original em vez da menor
+  python vsco_dl.py isahevangelista --forcar         # baixa mesmo se já estiver no registro
+
+Pasta de destino: sem -o (ou com -o relativo) os arquivos vão para dentro da pasta definida com
+  python pasta_destino.py "D:\\Fotos VSCO"   (ver pasta_destino.py)
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.parse
+from datetime import datetime, timedelta, timezone
+
+from pasta_destino import Destino
+from registro_perfis import ARQUIVO_PADRAO, RegistroPerfis
+
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
+API = "https://vsco.co/api/3.0/medias/profile"
+PAGE_SIZE = 14  # o mesmo valor que o site usa; valores maiores levam 403 do Cloudflare
+LARGURA_MINIMA = 300  # largura mínima pedida ao CDN; ele arredonda para a faixa dele (às vezes um pouco maior)
+RPS_PADRAO = 1.5
+SAIDA_BLOQUEIO = 3  # código de saída quando o Cloudflare bloqueia (p/ parar laços em PowerShell/bash)
+
+# O Cloudflare do vsco.co bloqueia o fingerprint TLS do Python (urllib/requests -> 403),
+# mas aceita o curl. Por isso todas as requisições passam pelo curl.
+CURL = shutil.which("curl") or sys.exit("curl não encontrado no PATH.")
+COOKIE_JAR = os.path.join(tempfile.gettempdir(), f"vsco_cookies_{os.getpid()}.txt")
+STATUS_LOTE = ".curl_status.tmp"  # criado dentro da pasta de saída enquanto um lote baixa
+
+
+# ---------------------------------------------------------------- bloqueio do Cloudflare
+
+class Bloqueado(Exception):
+    """O firewall do VSCO bloqueou o acesso. Tudo para; a retomada fica para a próxima execução."""
+
+
+PAUSA_PADRAO_MIN = 5  # minutos parados antes da requisição de teste
+MAX_PAUSAS = 3  # pausas por execução; depois disso o próximo bloqueio encerra direto
+LIMITE_NEGADAS = 5  # rede de segurança caso o Cloudflare mude o texto da página de bloqueio
+
+_parada = threading.Event()  # bloqueio confirmado: acorda e interrompe todas as threads
+_motivo_parada = None
+_estado = threading.Condition()  # protege as variáveis abaixo e avisa o fim de uma pausa
+_pausado = False
+_pausas_feitas = 0
+_pausa_min = PAUSA_PADRAO_MIN
+_negadas_seguidas = 0
+
+_MARCAS_BLOQUEIO = re.compile(
+    rb"you have been blocked|you are being rate limited|Attention Required! \| Cloudflare"
+    rb"|cf-error-details|<title>Just a moment|challenge-platform", re.I)
+
+
+def parar(motivo):
+    global _motivo_parada
+    with _estado:
+        if not _parada.is_set():
+            _motivo_parada = motivo
+            _parada.set()
+        _estado.notify_all()
+
+
+def checar_parada():
+    if _parada.is_set():
+        raise Bloqueado(_motivo_parada)
+
+
+def pausado():
+    return _pausado
+
+
+def aguardar_pausa():
+    """Se há uma pausa de bloqueio em andamento, espera ela terminar. Levanta Bloqueado se confirmou."""
+    with _estado:
+        while _pausado and not _parada.is_set():
+            _estado.wait(1)  # com prazo: no Windows um wait sem prazo não deixa o Ctrl+C passar
+    checar_parada()
+
+
+def _descrever_bloqueio(code, corpo):
+    """Texto curto da página de bloqueio: título/h1 + Ray ID (útil se for pedir desbloqueio)."""
+    m = re.search(rb"<h1[^>]*>(.*?)</h1>", corpo, re.S) or re.search(rb"<title>(.*?)</title>", corpo, re.S)
+    texto = re.sub(rb"<[^>]+>|\s+", b" ", m.group(1)).strip().decode("utf-8", "replace") if m else "página do Cloudflare"
+    ray = re.search(rb"Ray ID:?\s*(?:<[^>]+>\s*)*([0-9a-f]{16})", corpo)
+    return f'HTTP {code} "{texto}"' + (f" (Cloudflare Ray ID {ray.group(1).decode()})" if ray else "")
+
+
+def _eh_bloqueio(code, corpo):
+    return code in ("403", "429") and bool(_MARCAS_BLOQUEIO.search(corpo))
+
+
+def checar_resposta(code, corpo=b"", url=None):
+    """Chamada a cada resposta HTTP. Se for a página de bloqueio, desafio ou limite do Cloudflare
+    (ou LIMITE_NEGADAS respostas 403/429 seguidas), pausa tudo e confirma o bloqueio (ver
+    confirmar_bloqueio). Devolve True se o bloqueio NÃO se confirmou: a requisição deve ser repetida.
+    Levanta Bloqueado se ele se confirmou."""
+    global _negadas_seguidas
+    with _estado:
+        _negadas_seguidas = _negadas_seguidas + 1 if code in ("403", "429") else 0
+        negadas = _negadas_seguidas
+    if _eh_bloqueio(code, corpo):
+        motivo = _descrever_bloqueio(code, corpo)
+    elif negadas >= LIMITE_NEGADAS:
+        motivo = f"{negadas} respostas HTTP 403/429 seguidas"
+    else:
+        return False
+    confirmar_bloqueio(motivo + (f"\n    em {url}" if url else ""), url)
+    return True
+
+
+def _sondar(url):
+    """A requisição de teste: um GET simples, fora do RITMO. Devolve (código, corpo)."""
+    r = subprocess.run([CURL, "-sS", "-L", "--max-time", "60", "-A", UA, "-w", "\n%{http_code}", url],
+                       capture_output=True)
+    corpo, _, code = r.stdout.rpartition(b"\n")
+    return code.decode(errors="replace").strip()[-3:], corpo
+
+
+def confirmar_bloqueio(motivo, url):
+    """Uma recusa isolada acontece às vezes sem o site estar bloqueando de fato. Então, antes de
+    desistir: pausa TODAS as threads por `_pausa_min` minutos (o curl em andamento é encerrado) e faz
+    UMA requisição de teste na mesma URL. Se ela passar, retoma; se for recusada de novo, para tudo.
+
+    Só a primeira thread que vê o bloqueio conduz a pausa; as outras esperam o resultado.
+    Sem pausa configurada (0) ou depois de MAX_PAUSAS pausas, o bloqueio encerra direto."""
+    global _pausado, _pausas_feitas, _negadas_seguidas
+    with _estado:
+        if _parada.is_set():
+            raise Bloqueado(_motivo_parada)
+        if _pausado:  # outra thread já está conduzindo a pausa
+            dono = False
+        elif not _pausa_min or _pausas_feitas >= MAX_PAUSAS or not url:
+            dono = None
+        else:
+            dono, _pausado = True, True
+            _pausas_feitas += 1
+    if dono is None:
+        if _pausa_min and _pausas_feitas >= MAX_PAUSAS:
+            motivo += f"\n    (limite de {MAX_PAUSAS} pausas por execução atingido)"
+        parar(motivo)
+        raise Bloqueado(motivo)
+    if not dono:
+        aguardar_pausa()
+        return
+
+    try:
+        volta = datetime.now() + timedelta(minutes=_pausa_min)
+        _log(f"\n!!! Página de bloqueio do Cloudflare: {motivo}\n"
+             f"    Todas as requisições estão pausadas por {_pausa_min:g} min (pausa {_pausas_feitas} de "
+             f"{MAX_PAUSAS}); às {volta:%H:%M:%S} faço UMA requisição de teste antes de decidir.")
+        fim = time.monotonic() + _pausa_min * 60
+        while time.monotonic() < fim:  # em fatias de 1 s: deixa o Ctrl+C interromper
+            if _parada.wait(min(1, max(0, fim - time.monotonic()))):
+                checar_parada()
+        code, corpo = _sondar(url)
+        RITMO.contar()
+        if code in ("403", "429"):
+            detalhe = _descrever_bloqueio(code, corpo) if _eh_bloqueio(code, corpo) else f"HTTP {code}"
+            motivo += f"\n    confirmado: o teste após {_pausa_min:g} min de pausa também foi recusado ({detalhe})"
+            parar(motivo)
+            raise Bloqueado(motivo)
+        _log(f"    Teste passou (HTTP {code}): foi uma recusa isolada. Retomando.")
+    finally:
+        with _estado:
+            _pausado = False
+            _negadas_seguidas = 0
+            _estado.notify_all()
+
+
+def mensagem_bloqueio(ex):
+    rps = f"{RITMO.rps:g}" if RITMO.rps else "sem limite"
+    return (f"\n*** BLOQUEADO pelo firewall do VSCO: {ex}\n"
+            f"    Todas as requisições foram interrompidas para não prolongar o bloqueio.\n"
+            f"    O perfil em andamento NÃO foi registrado: na próxima execução os arquivos já baixados\n"
+            f"    são pulados e o resto é retomado. Espere o bloqueio passar e rode de novo, de\n"
+            f"    preferência com um --rps menor (atual: {rps}).")
+
+
+# ---------------------------------------------------------------- ritmo global
+
+class Ritmo:
+    """Limite global de requisições por segundo, compartilhado por todas as threads.
+
+    Cada requisição reserva uma "vaga" de início; as vagas ficam espaçadas de 1/rps segundos.
+    Um lote do curl reserva várias vagas seguidas de uma vez e o próprio curl as respeita com
+    --rate, então a soma de tudo (listagem + fotos) nunca passa de `rps`."""
+
+    def __init__(self, rps=0):
+        self.rps = rps
+        self._prox = 0.0
+        self._lock = threading.Lock()
+
+    def reservar(self, n=1):
+        """Reserva n inícios de requisição consecutivos e espera até o primeiro.
+        Durante uma pausa de bloqueio, espera ela terminar antes de reservar."""
+        while True:
+            aguardar_pausa()
+            if not self.rps:
+                return
+            pausas = _pausas_feitas
+            with self._lock:
+                agora = time.monotonic()
+                inicio = max(agora, self._prox)
+                self._prox = inicio + n / self.rps
+            if inicio > agora:
+                _parada.wait(inicio - agora)
+            aguardar_pausa()
+            if _pausas_feitas == pausas:
+                return
+            # houve uma pausa enquanto esperava: a vaga ficou para trás, reserva outra
+
+    def contar(self):
+        """Conta uma requisição feita por fora (a de teste da pausa): empurra a próxima vaga."""
+        if self.rps:
+            with self._lock:
+                self._prox = max(self._prox, time.monotonic()) + 1 / self.rps
+
+    def opcao_curl(self):
+        """--rate do curl equivalente (ele só aceita inteiros por unidade de tempo)."""
+        return ["--rate", f"{max(1, round(self.rps * 3600))}/h"] if self.rps else []
+
+    def estimar(self, n):
+        """Tempo mínimo para n requisições neste ritmo (ex.: "~1 min 05 s a 1.5 req/s")."""
+        return f"~{duracao(n / self.rps)} a {self.rps:g} req/s" if self.rps else ""
+
+
+RITMO = Ritmo(RPS_PADRAO)
+
+
+def duracao(seg):
+    seg = int(round(seg))
+    h, resto = divmod(seg, 3600)
+    m, s = divmod(resto, 60)
+    return f"{h} h {m:02d} min" if h else f"{m} min {s:02d} s" if m else f"{s} s"
+
+
+# ---------------------------------------------------------------- requisições
+
+def fetch(url, headers=None, retries=3):
+    """GET via curl (página/API), respeitando o RITMO. Retorna o corpo em bytes."""
+    cmd = [CURL, "-sS", "-L", "--compressed", "--max-time", "120", "-A", UA,
+           "-b", COOKIE_JAR, "-c", COOKIE_JAR, "-w", "\n%{http_code}"]
+    for k, v in (headers or {}).items():
+        cmd += ["-H", f"{k}: {v}"]
+    cmd.append(url)
+    attempt = 0
+    while True:
+        RITMO.reservar()
+        r = subprocess.run(cmd, capture_output=True)
+        corpo, _, code = r.stdout.rpartition(b"\n")
+        code = code.decode(errors="replace").strip()[-3:]
+        if checar_resposta(code, corpo, url):
+            continue  # bloqueio não confirmado após a pausa: repete sem gastar tentativa
+        if r.returncode == 0 and code == "200":
+            return corpo
+        if attempt < retries - 1 and (r.returncode != 0 or code in ("403", "429", "500", "502", "503", "504")):
+            _parada.wait(2 ** attempt * 2)
+            checar_parada()
+            attempt += 1
+            continue
+        raise RuntimeError(f"HTTP {code or '?'} em {url} {r.stderr.decode(errors='replace').strip()}")
+
+
+def load_profile(username):
+    html = fetch(f"https://vsco.co/{username}/gallery").decode("utf-8")
+    m = re.search(r"window\.__PRELOADED_STATE__\s*=\s*(\{.*?\})\s*</script>", html, re.S)
+    if not m:
+        raise LookupError("não encontrei __PRELOADED_STATE__ no HTML (perfil inexistente ou layout mudou)")
+    state = json.loads(re.sub(r":\s*undefined\b", ":null", m.group(1)))
+    site = state["sites"]["siteByUsername"].get(username, {}).get("site")
+    if not site:
+        raise LookupError(f"perfil '{username}' não encontrado")
+    return site["id"], state["users"]["currentUser"]["tkn"]
+
+
+def _log(msg):
+    print(msg, file=sys.stderr)
+
+
+def iter_media(site_id, token, username, log=_log):
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Referer": f"https://vsco.co/{username}/gallery",
+    }
+    cursor, page = None, 0
+    while True:
+        q = {"site_id": site_id, "limit": PAGE_SIZE}
+        if cursor:
+            q["cursor"] = cursor
+        data = json.loads(fetch(f"{API}?{urllib.parse.urlencode(q)}", headers))
+        page += 1
+        items = data.get("media", [])
+        if log:
+            log(f"  página {page}: {len(items)} itens")
+        yield from items
+        cursor = data.get("next_cursor")
+        if not cursor or not items:
+            break
+
+
+def to_url(u):
+    if not u:
+        return None
+    u = u.split("?")[0]
+    u = u if u.startswith("http") else "https://" + u.lstrip("/")
+    # alguns arquivos têm nome com emoji/acentos (ex.: "🗻.jpg"); a URL precisa ir percent-encoded
+    p = urllib.parse.urlsplit(u)
+    return urllib.parse.urlunsplit(p._replace(path=urllib.parse.quote(urllib.parse.unquote(p.path))))
+
+
+def media_entry(item, largura=LARGURA_MINIMA):
+    """Normaliza um item da API em (id, url, ext, timestamp_ms, is_hls).
+
+    `largura` pede a foto redimensionada pelo CDN; None/0 = arquivo original."""
+    kind = item.get("type")
+    obj = item.get(kind) or {}
+    mid = obj.get("_id") or obj.get("id")
+    ts = obj.get("capture_date_ms") or obj.get("upload_date") or obj.get("created_date") or 0
+    if kind == "image" and not obj.get("is_video"):
+        url = to_url(obj.get("responsive_url"))
+        ext = os.path.splitext(urllib.parse.urlparse(url).path)[1] or ".jpg"
+        if url and largura:
+            url += f"?w={largura}"
+        return mid, url, ext, ts, False
+    # vídeos: VSCO costuma expor mp4 (video_url) e/ou HLS (playback_url .m3u8)
+    for key in ("video_url", "playback_url", "hls_url"):
+        if obj.get(key):
+            url = to_url(obj[key])
+            return mid, url, ".mp4", ts, url.endswith(".m3u8")
+    return mid, None, None, ts, False
+
+
+def collect_entries(site_id, token, username, limit=None, largura=LARGURA_MINIMA, log=_log):
+    """Percorre a paginação e devolve a lista de mídias (sem duplicatas). `log=None` silencia."""
+    entries, seen = [], set()
+    for item in iter_media(site_id, token, username, log):
+        e = media_entry(item, largura)
+        if e[0] in seen:
+            continue
+        seen.add(e[0])
+        if e[1]:
+            entries.append(e)
+        elif log:
+            log(f"  aviso: não achei URL para {item.get('type')} {e[0]}")
+        if limit and len(entries) >= limit:
+            break
+    return entries
+
+
+# ---------------------------------------------------------------- downloads
+
+def media_path(entry, outdir):
+    mid, _, ext, ts, _ = entry
+    date = datetime.fromtimestamp(ts / 1000, timezone.utc).strftime("%Y-%m-%d_%H%M%S") if ts else "sem-data"
+    return os.path.join(outdir, f"{date}_{mid}{ext}")
+
+
+def _finalizar(entry, tmp, path):
+    os.replace(tmp, path)
+    ts = entry[3]
+    if ts:
+        os.utime(path, (ts / 1000, ts / 1000))
+
+
+def _checar_curl():
+    """O lote usa -w '%output{}' (curl >= 8.3) para saber, arquivo a arquivo, como cada download terminou."""
+    r = subprocess.run([CURL, "--version"], capture_output=True, text=True)
+    m = re.match(r"curl (\d+)\.(\d+)", r.stdout)
+    if not m or (int(m.group(1)), int(m.group(2))) < (8, 3):
+        sys.exit(f"É preciso curl 8.3 ou mais novo (encontrado: {r.stdout.splitlines()[0] if r.stdout else CURL}).")
+
+
+def _baixar_fatia(fatia, outdir, progresso):
+    """Baixa `fatia` [(entry, path)] com UM processo curl: em série, na mesma conexão, no ritmo do
+    RITMO (vagas já reservadas por quem chama). O resultado de cada arquivo é lido ao vivo, então um
+    bloqueio (aqui ou em outra thread) mata o curl na hora.
+
+    Devolve (retentar, repetir): `retentar` são falhas transitórias, para outra rodada com espera;
+    `repetir` são os itens interrompidos por uma pausa de bloqueio que não se confirmou, para
+    baixar logo em seguida."""
+    por_nome = {os.path.basename(path) + ".part": (entry, path) for entry, path in fatia}
+    config = "".join(f'url = "{entry[1]}"\noutput = "{nome}"\n' for nome, (entry, _) in por_nome.items())
+    status = os.path.join(outdir, STATUS_LOTE)
+    if os.path.exists(status):
+        os.remove(status)
+    # %output{>>arq} grava e fecha o arquivo a cada transferência (stdout/stderr em pipe só chegam no fim)
+    cmd = [CURL, "-sS", "-L", "--max-time", "120", "-A", UA, *RITMO.opcao_curl(), "-K", "-",
+           "-w", f"%output{{>>{STATUS_LOTE}}}%{{filename_effective}}\t%{{http_code}}\t%{{exitcode}}\n"]
+    retentar, repetir, lido, resto, interrompido = [], [], 0, b"", False
+    with tempfile.TemporaryFile() as erros:  # arquivo, não pipe: um pipe cheio travaria o curl
+        proc = subprocess.Popen(cmd, cwd=outdir, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=erros)
+        try:
+            proc.stdin.write(config.encode())
+            proc.stdin.close()
+            while True:
+                terminou = proc.poll() is not None
+                if os.path.exists(status):
+                    with open(status, "rb") as f:
+                        f.seek(lido)
+                        novo = f.read()
+                    lido += len(novo)
+                    *linhas, resto = (resto + novo).split(b"\n")
+                    for linha in linhas:
+                        nome, code, exitcode = linha.decode(errors="replace").strip().split("\t")
+                        entry, path = por_nome.pop(nome)
+                        tmp = os.path.join(outdir, nome)
+                        if code == "200" and exitcode == "0":
+                            checar_resposta(code)
+                            _finalizar(entry, tmp, path)
+                            progresso("ok")
+                            continue
+                        corpo = b""
+                        if os.path.exists(tmp):
+                            with open(tmp, "rb") as f:
+                                corpo = f.read(256 * 1024)
+                            os.remove(tmp)
+                        negada = code in ("403", "429")
+                        if negada:  # possível bloqueio: nenhuma requisição a mais antes de decidir
+                            proc.kill()
+                            proc.wait()
+                        # página de bloqueio: pausa e testa; Bloqueado se confirmar
+                        if checar_resposta(code, corpo, entry[1]):
+                            repetir.append((entry, path))
+                        elif exitcode != "0" or code in ("429", "500", "502", "503", "504"):
+                            retentar.append((entry, path))
+                        else:
+                            progresso(f"erro (HTTP {code})", entry[1])
+                        if negada:
+                            interrompido = True  # o resto da fatia volta para a fila
+                            break
+                if interrompido or terminou:
+                    break
+                _parada.wait(0.2)
+                checar_parada()  # outra thread confirmou um bloqueio
+                if pausado():  # outra thread viu um bloqueio: encerra o curl e espera a pausa lá fora
+                    interrompido = True
+                    break
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            for nome in por_nome:  # o que estava em andamento quando o curl foi interrompido
+                tmp = os.path.join(outdir, nome)
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            if os.path.exists(status):
+                os.remove(status)
+        if proc.returncode and not lido and not interrompido:
+            erros.seek(0)
+            raise RuntimeError(f"curl falhou (código {proc.returncode}): {erros.read().decode(errors='replace').strip()}")
+    if interrompido:
+        return retentar, repetir + list(por_nome.values())
+    return retentar + list(por_nome.values()), []  # sem linha de status = curl morreu antes: tenta de novo
+
+
+def download_all(entries, outdir, links_only=False, ceder_vez=None):
+    """Grava links.txt e baixa tudo no ritmo global. Retorna (ok, pulados, falhas).
+
+    ceder_vez: função opcional; enquanto devolver True, o lote é dividido em fatias de PAGE_SIZE
+    fotos para que outra thread (ex.: a listagem do próximo perfil) consiga vagas no RITMO entre
+    uma fatia e outra. Sem ela, o perfil inteiro sai de um único processo curl."""
+    os.makedirs(outdir, exist_ok=True)
+    links_path = os.path.join(outdir, "links.txt")
+    with open(links_path, "w", encoding="utf-8") as f:
+        f.writelines(e[1] + "\n" for e in entries)
+    _log(f"{len(entries)} mídias encontradas. Links em {links_path}")
+    if links_only:
+        return 0, 0, 0
+
+    alvos = [(e, media_path(e, outdir)) for e in entries]
+    skipped = len(alvos)
+    alvos = [(e, p) for e, p in alvos if not (os.path.exists(p) and os.path.getsize(p) > 0)]
+    skipped -= len(alvos)
+    if alvos:
+        estimativa = f", tempo estimado {RITMO.estimar(len(alvos))}" if RITMO.rps else ""
+        _log(f"  {len(alvos)} a baixar ({skipped} já existem){estimativa}")
+    contagem = {"ok": 0, "falhas": 0}
+
+    def progresso(status, info=None):
+        if status == "ok":
+            contagem["ok"] += 1
+        else:
+            contagem["falhas"] += 1
+            _log(f"\n  {status}: {info}")
+        feitos = skipped + contagem["ok"] + contagem["falhas"]
+        resta = f"  resta {RITMO.estimar(len(entries) - feitos)}" if RITMO.rps and feitos < len(entries) else ""
+        print(f"\r  [{feitos}/{len(entries)}] ok={contagem['ok']} pulados={skipped} falhas={contagem['falhas']}{resta}   ",
+              end="", file=sys.stderr, flush=True)
+
+    hls = [a for a in alvos if a[0][4]]
+    diretos = [a for a in alvos if not a[0][4]]
+    if diretos:
+        _checar_curl()
+    for rodada in range(3):  # erros de rede/5xx voltam para uma nova rodada, com espera crescente
+        if not diretos:
+            break
+        if rodada:
+            _log(f"\n  {len(diretos)} com erro temporário; nova tentativa em {10 * rodada} s")
+            _parada.wait(10 * rodada)
+        pendentes, diretos = diretos, []
+        while pendentes:
+            n = PAGE_SIZE if ceder_vez and ceder_vez() else len(pendentes)
+            fatia, pendentes = pendentes[:n], pendentes[n:]
+            RITMO.reservar(len(fatia))  # durante uma pausa de bloqueio, espera aqui
+            falhas, repetir = _baixar_fatia(fatia, outdir, progresso)
+            diretos += falhas
+            pendentes = repetir + pendentes
+    for entry, _ in diretos:
+        progresso("erro (falhou após 3 rodadas)", entry[1])
+
+    for entry, path in hls:
+        if not shutil.which("ffmpeg"):
+            progresso("erro (vídeo HLS precisa de ffmpeg)", entry[1])
+            continue
+        RITMO.reservar()
+        tmp = path + ".part.mp4"
+        r = subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", entry[1], "-c", "copy", tmp])
+        if r.returncode == 0:
+            _finalizar(entry, tmp, path)
+            progresso("ok")
+        else:
+            progresso(f"erro (ffmpeg {r.returncode})", entry[1])
+    if alvos:
+        print(file=sys.stderr)
+    return contagem["ok"], skipped, contagem["falhas"]
+
+
+# ---------------------------------------------------------------- linha de comando
+
+def rps_arg(texto):
+    v = float(texto.replace(",", "."))
+    if v < 0:
+        raise argparse.ArgumentTypeError("precisa ser >= 0")
+    return v
+
+
+def add_rede_args(ap):
+    ap.add_argument("--rps", type=rps_arg, default=RPS_PADRAO,
+                    help="limite global de requisições por segundo (padrão %(default)s; 0 = sem limite)")
+    ap.add_argument("--pausa-bloqueio", type=rps_arg, default=PAUSA_PADRAO_MIN, metavar="MIN",
+                    help="ao ver a página de bloqueio, pausa tudo por MIN minutos e faz 1 requisição de "
+                         f"teste antes de desistir (padrão %(default)s; até {MAX_PAUSAS} pausas por "
+                         "execução; 0 = para no primeiro bloqueio)")
+
+
+def aplicar_rede_args(args):
+    global _pausa_min
+    RITMO.rps = args.rps
+    _pausa_min = args.pausa_bloqueio
+
+
+def main():
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    ap = argparse.ArgumentParser(description="Baixa a galeria de um perfil VSCO (baixa qualidade, ~300 px, por padrão).")
+    ap.add_argument("perfil", help="username ou URL (ex.: isahevangelista ou https://vsco.co/isahevangelista/gallery)")
+    ap.add_argument("-o", "--out", help="pasta de saída (padrão: <pasta de pasta_destino.py>/<username>; "
+                                        "relativa = dentro da pasta padrão)")
+    add_rede_args(ap)
+    ap.add_argument("--links-only", action="store_true", help="só grava links.txt, sem baixar")
+    ap.add_argument("--original", action="store_true", help="baixa a resolução original (padrão: ~300 px)")
+    ap.add_argument("--forcar", action="store_true", help="baixa mesmo que o perfil já esteja no registro")
+    ap.add_argument("--registro", default=ARQUIVO_PADRAO, help="arquivo de perfis acessados (padrão: %(default)s)")
+    args = ap.parse_args()
+    aplicar_rede_args(args)
+
+    m = re.search(r"vsco\.co/([^/?#]+)", args.perfil)
+    username = m.group(1) if m else args.perfil.strip("/")
+    outdir = Destino(args.out or username).pasta()
+
+    try:
+        site_id, token = load_profile(username)
+    except (LookupError, RuntimeError) as ex:  # RuntimeError = HTTP 404 etc. (perfil inexistente)
+        sys.exit(f"Erro: {ex}")
+    with RegistroPerfis(args.registro) as registro:
+        if site_id in registro and not args.forcar:
+            sys.exit(f"Perfil {username} já está em {args.registro}; pulado (use --forcar para baixar de novo).")
+        _log(f"Perfil {username} (site_id={site_id}) — listando mídias...")
+        entries = collect_entries(site_id, token, username, largura=None if args.original else LARGURA_MINIMA)
+        ok, skipped, failed = download_all(entries, outdir, args.links_only)
+        # só registra quando nada falhou: assim uma próxima execução ainda completa o que faltou
+        if not args.links_only and not failed:
+            registro.registrar(site_id, username, "baixado" if entries else "vazio", len(entries))
+    _log(f"Concluído em {outdir}")
+
+
+def cleanup():
+    if os.path.exists(COOKIE_JAR):
+        os.remove(COOKIE_JAR)
+
+
+def rodar(main_fn):
+    """Executa o main tratando o bloqueio: mensagem clara e código de saída SAIDA_BLOQUEIO."""
+    if hasattr(signal, "SIGBREAK"):  # Ctrl+Break (é o que o painel.py envia para parar) = Ctrl+C
+        signal.signal(signal.SIGBREAK, signal.default_int_handler)
+    try:
+        main_fn()
+    except Bloqueado as ex:
+        _log(mensagem_bloqueio(ex))
+        sys.exit(SAIDA_BLOQUEIO)
+    except KeyboardInterrupt:
+        _log("\nInterrompido. Rode de novo para continuar de onde parou.")
+        sys.exit(130)
+    finally:
+        cleanup()
+
+
+if __name__ == "__main__":
+    rodar(main)

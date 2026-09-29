@@ -1,0 +1,2 @@
+# Pasta base dos downloads. Relida antes de cada perfil: pode ser alterada durante a execução.
+F:\avaliador
