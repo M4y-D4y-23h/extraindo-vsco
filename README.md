@@ -10,16 +10,8 @@ Principais características:
   o CDN às vezes entrega um pouco mais, até ~480 px). Use `--original` para baixar a resolução cheia.
 - **Registro de perfis acessados** (`perfis_acessados.txt`): perfis já baixados são pulados
   automaticamente nas próximas execuções, evitando downloads repetidos.
-- **Feito para escalar**: o registro é lido em streaming e mantido em memória numa tabela hash
-  compacta (~12–24 bytes por perfil), então continua leve mesmo com milhões de perfis.
 - **Ritmo global** (`--rps`, padrão 1,5 requisição/s): um único limite para todas as requisições
   (páginas, API e fotos), o que permite prever o tempo e rodar sem supervisão.
-- **Pausa e confirma no bloqueio**: se o Cloudflare devolver a página *"Sorry, you have been
-  blocked"*, o script pausa todas as requisições na hora, espera alguns minutos e faz **uma** requisição
-  de teste. Se ela passar, foi uma recusa isolada e o download continua; se não, tudo para e o script
-  sai com código **3**.
-- **Uma conexão por lote**: as fotos de um perfil saem de um único processo `curl`, reaproveitando a
-  conexão, em vez de um processo e uma conexão nova por foto.
 - **Retomada**: arquivos que já existem na pasta não são baixados de novo.
 - **Pasta de destino padrão e trocável em execução** (`pasta_destino.py`): define onde tudo é salvo;
   o arquivo é relido antes de cada perfil, então dá para mudar a pasta com o script rodando.
@@ -29,10 +21,8 @@ Principais características:
 ## Requisitos
 
 - Python 3.8+ (só biblioteca padrão, nada para instalar com `pip`)
-- `curl` **8.3 ou mais novo** no PATH (o do Windows 10/11 atualizado já serve; o script confere)
 - `ffmpeg` no PATH — opcional, só necessário para vídeos em HLS (`.m3u8`)
 
-> Todas as requisições passam pelo `curl` porque o Cloudflare do vsco.co bloqueia o fingerprint
 > TLS do Python (`urllib`/`requests` recebem 403).
 
 ---
@@ -48,8 +38,7 @@ Principais características:
 | `pasta_destino.py` | Mostra/define a pasta padrão onde os downloads são salvos (`pasta_destino.txt`). |
 | `pasta_destino.txt` | Criado por `pasta_destino.py`. Uma linha com a pasta base (pode ser editado no Bloco de Notas). |
 | `perfis_acessados.txt` | Criado automaticamente na primeira execução. Histórico de perfis já processados. |
-| `vsco_sessao.txt` | Opcional, criado por você. Token da sua sessão logada, usado só na pesquisa (ver *Erro de autenticação na pesquisa*). |
-| `variacoes_isabela.txt` | 100 variações de nome de perfil para "isabela" (uma por linha). |
+| `vsco_sessao.txt` | Opcional, criado por você. Token da sua sessão logada, usado só na pesquisa (ver *Erro de autenticação na pesquisa*).
 
 ---
 
@@ -71,8 +60,6 @@ Detalhes:
 
 - Deixe a janela preta do `Painel.bat` aberta; fechar ela encerra o painel (e o download em andamento).
 - Só roda uma execução por vez: duas ao mesmo tempo dobrariam o ritmo de requisições.
-- *Parar agora* funciona como um Ctrl+C: o curl é interrompido, arquivos parciais são apagados e o
-  perfil em andamento não entra no registro (é retomado na próxima vez).
 - Numa lista, um bloqueio confirmado (código 3) interrompe a lista inteira e o painel diz de qual item retomar.
 - O painel só aceita conexões do próprio computador. Se a porta 8765 estiver ocupada, ele usa a seguinte.
 
@@ -133,8 +120,6 @@ a página do Cloudflare), o script tenta, nesta ordem:
 3. **A própria página** `https://vsco.co/search/people/<termo>`: lê os links dos perfis no HTML. Só vem
    a primeira leva de resultados (o resto a página carrega com o scroll), então o `-n` pode não ser atingido.
 
-Se nada disso trouxer perfis, o script para com a mensagem *"Erro de autenticação na pesquisa"* e
-código 1.
 
 **Como pegar o token da sua sessão** (a sua conta, no seu navegador):
 
