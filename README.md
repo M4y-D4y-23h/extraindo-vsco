@@ -48,6 +48,7 @@ Principais características:
 | `pasta_destino.py` | Mostra/define a pasta padrão onde os downloads são salvos (`pasta_destino.txt`). |
 | `pasta_destino.txt` | Criado por `pasta_destino.py`. Uma linha com a pasta base (pode ser editado no Bloco de Notas). |
 | `perfis_acessados.txt` | Criado automaticamente na primeira execução. Histórico de perfis já processados. |
+| `vsco_sessao.txt` | Opcional, criado por você. Token da sua sessão logada, usado só na pesquisa (ver *Erro de autenticação na pesquisa*). |
 | `variacoes_isabela.txt` | 100 variações de nome de perfil para "isabela" (uma por linha). |
 
 ---
@@ -118,7 +119,39 @@ python vsco_search_dl.py isabela                      # 10 perfis novos -> ./bus
 python vsco_search_dl.py isabela -n 25 -o saida --rps 1
 python vsco_search_dl.py isabela --forcar             # ignora o registro
 python vsco_search_dl.py isabela --links-only         # só lista/gera links.txt de cada perfil
+python vsco_search_dl.py isabela --token "SEU_TOKEN"  # pesquisa com a sua sessão logada (ver abaixo)
 ```
+
+### Erro de autenticação na pesquisa
+
+A pesquisa usa a API `/api/2.0/search/grids`. Se o VSCO passar a exigir login nela (HTTP 401/403 sem
+a página do Cloudflare), o script tenta, nesta ordem:
+
+1. **A sua sessão logada**, se você configurou um token (`--token`, variável `VSCO_TOKEN` ou o arquivo
+   `vsco_sessao.txt`). É a alternativa completa: a pesquisa volta a paginar normalmente.
+2. **O token anônimo**, como sempre fez.
+3. **A própria página** `https://vsco.co/search/people/<termo>`: lê os links dos perfis no HTML. Só vem
+   a primeira leva de resultados (o resto a página carrega com o scroll), então o `-n` pode não ser atingido.
+
+Se nada disso trouxer perfis, o script para com a mensagem *"Erro de autenticação na pesquisa"* e
+código 1.
+
+**Como pegar o token da sua sessão** (a sua conta, no seu navegador):
+
+1. Entre no `https://vsco.co` com a sua conta e abra `https://vsco.co/search/people/isabela`.
+2. Aperte **F12** → aba **Rede** (*Network*) → digite `search` no filtro e recarregue a página (F5).
+3. Clique numa requisição para `api/2.0/search/...` (ou outra para `vsco.co/api/...`) e, em
+   **Cabeçalhos da solicitação**, copie o valor de `Authorization` (o texto depois de `Bearer`).
+4. Crie `vsco_sessao.txt` ao lado dos scripts e cole o token numa linha (pode colar a linha
+   `Authorization: Bearer ...` inteira, o script limpa).
+
+O painel e os laços `foreach` passam a usar o arquivo automaticamente. Cuidados:
+
+- O token dá acesso à sua conta: **não compartilhe** o arquivo. Ele está no `.gitignore`.
+- Ele expira. Quando o script avisar *"o token da sessão foi recusado"*, copie um novo.
+- O token só é usado na pesquisa; a listagem e o download das fotos continuam com o token anônimo e
+  no mesmo ritmo (`--rps`). Um bloqueio do Cloudflare (código 3) **não** é problema de login: espere e
+  rode de novo com um `--rps` menor.
 
 ### Usando o arquivo de variações
 
@@ -153,13 +186,14 @@ foreach ($v in Get-Content variacoes_isabela.txt) {
 | `--forcar` | ambos | Não pula perfis que já estão no registro |
 | `--registro ARQ` | ambos | Usa outro arquivo de registro (padrão: `perfis_acessados.txt` ao lado dos scripts) |
 | `--links-only` | ambos | Só gera `links.txt`, sem baixar (não grava no registro) |
+| `--token TOKEN` | busca | Token da sua sessão logada para a pesquisa (padrão: `VSCO_TOKEN` ou `vsco_sessao.txt`) |
 
 ### Códigos de saída
 
 | Código | Significado |
 |---|---|
 | 0 | Terminou (pode ter havido falhas pontuais, listadas na saída) |
-| 1 | Erro (perfil inexistente, perfil já no registro, curl ausente etc.) |
+| 1 | Erro (perfil inexistente, perfil já no registro, curl ausente, pesquisa exigindo login etc.) |
 | 3 | **Bloqueado pelo Cloudflare** (confirmado pela requisição de teste): tudo foi interrompido; rode de novo mais tarde |
 
 ---

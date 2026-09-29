@@ -44,7 +44,9 @@ e ela é relida antes de cada perfil, então dá para trocar durante a execuçã
 """
 import argparse
 import json
+import os
 import queue
+import re
 import sys
 import threading
 import urllib.parse
@@ -55,23 +57,104 @@ from vsco_dl import (LARGURA_MINIMA, RITMO, Bloqueado, add_rede_args, collect_en
                      aplicar_rede_args, fetch, load_profile, rodar)
 
 SEARCH_API = "https://vsco.co/api/2.0/search/grids"
+SEARCH_PAGE = "https://vsco.co/search/people/"
 SEARCH_PAGE_SIZE = 20
+# Token da SUA sessão logada no vsco.co (ver README, "Erro de autenticação na pesquisa").
+# Não vai para o git (.gitignore). Também pode vir de --token ou da variável VSCO_TOKEN.
+ARQUIVO_SESSAO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vsco_sessao.txt")
+# páginas que não são perfis, nos links da página de pesquisa
+_NAO_PERFIS = {"search", "user", "feed", "about", "store", "api", "spaces", "journal", "discover",
+               "static", "subscribe", "login", "signup", "account", "settings", "help", "legal", "careers"}
+
+
+class ErroAutenticacao(Exception):
+    """A API de pesquisa recusou o token (HTTP 401/403 que não é a página de bloqueio do Cloudflare)."""
+
+
+def ler_token_sessao(args):
+    """Token Bearer da sessão logada do usuário: --token, VSCO_TOKEN ou vsco_sessao.txt (nessa ordem)."""
+    token = args.token or os.environ.get("VSCO_TOKEN")
+    if not token and os.path.exists(ARQUIVO_SESSAO):
+        with open(ARQUIVO_SESSAO, encoding="utf-8-sig") as f:
+            linhas = [l.strip() for l in f if l.strip() and not l.lstrip().startswith("#")]
+        token = linhas[0] if linhas else None
+    if token:
+        token = re.sub(r"^(authorization:\s*)?bearer\s+", "", token.strip(), flags=re.I)  # aceita colar o header inteiro
+    return token or None
 
 
 def iter_search(query, token):
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
-        "Referer": f"https://vsco.co/search/people/{urllib.parse.quote(query)}",
+        "Referer": f"{SEARCH_PAGE}{urllib.parse.quote(query)}",
     }
     page = 0
     while True:
         q = urllib.parse.urlencode({"query": query, "page": page, "size": SEARCH_PAGE_SIZE})
-        results = json.loads(fetch(f"{SEARCH_API}?{q}", headers)).get("results", [])
+        url = f"{SEARCH_API}?{q}"
+        try:
+            # 1 tentativa só: repetir um 401/403 de login não adianta e ainda somaria recusas seguidas,
+            # o que dispara a pausa de bloqueio (LIMITE_NEGADAS). A página do Cloudflare vira Bloqueado lá dentro.
+            corpo = fetch(url, headers, retries=1)
+        except RuntimeError as ex:
+            if re.match(r"HTTP (401|403)\b", str(ex)):
+                raise ErroAutenticacao(str(ex)) from None
+            corpo = fetch(url, headers)  # erro de rede/5xx: agora sim, com as tentativas normais
+        results = json.loads(corpo).get("results", [])
         if not results:
             return
         yield from results
         page += 1
+
+
+def iter_search_html(query):
+    """Alternativa sem a API: lê os links de perfil da própria página https://vsco.co/search/people/<termo>
+    (os cards são <a href="https://vsco.co/<username>">). Só vem a primeira leva de resultados, porque o
+    resto é carregado pelo scroll infinito. O site_id de cada perfil sai da página da galeria dele."""
+    html = fetch(f"{SEARCH_PAGE}{urllib.parse.quote(query)}").decode("utf-8", "replace")
+    vistos = set()
+    for username in re.findall(r'href="(?:https://vsco\.co)?/([A-Za-z0-9_.-]+)/?(?:gallery)?"', html):
+        if username.lower() in _NAO_PERFIS or username in vistos or re.search(r"\.[a-z]{2,4}$", username):
+            continue
+        vistos.add(username)
+        try:
+            site_id, _ = load_profile(username)
+        except (LookupError, RuntimeError, ValueError):
+            continue  # link que não é perfil (ou perfil que sumiu)
+        yield {"siteSubDomain": username, "siteId": site_id}
+
+
+def iter_resultados(args, token_anonimo):
+    """Resultados da pesquisa, tentando nesta ordem:
+      1. API com o token da sessão logada do usuário (se ele configurou um);
+      2. API com o token anônimo (o que o script sempre usou);
+      3. HTML da página de pesquisa (primeira leva de resultados)."""
+    token_sessao = ler_token_sessao(args)
+    if token_sessao:
+        print("Pesquisa: usando o token da sua sessão logada", file=sys.stderr)
+        try:
+            yield from iter_search(args.termo, token_sessao)
+            return
+        except ErroAutenticacao as ex:
+            print(f"  aviso: o token da sessão foi recusado ({ex}); ele pode ter expirado.\n"
+                  f"  Copie um novo (ver README) para {ARQUIVO_SESSAO}. Tentando sem ele...", file=sys.stderr)
+    try:
+        yield from iter_search(args.termo, token_anonimo)
+        return
+    except ErroAutenticacao as ex:
+        print(f"  aviso: a API de pesquisa exigiu login ({ex}).\n"
+              f"  Lendo a página de pesquisa direto (só a primeira leva de perfis). Para a pesquisa\n"
+              f"  completa, salve o token da sua sessão em {ARQUIVO_SESSAO} (ver README).", file=sys.stderr)
+    achou = False
+    for r in iter_search_html(args.termo):
+        achou = True
+        yield r
+    if not achou:
+        raise ErroAutenticacao(
+            "a pesquisa do VSCO exige login e a página de pesquisa não trouxe perfis.\n"
+            f"  Salve o token da sua sessão logada em {ARQUIVO_SESSAO} (ver README, "
+            "\"Erro de autenticação na pesquisa\") e rode de novo.")
 
 
 def main():
@@ -86,6 +169,8 @@ def main():
     ap.add_argument("--original", action="store_true", help="baixa a resolução original (padrão: ~300 px)")
     ap.add_argument("--forcar", action="store_true", help="não pula perfis que já estão no registro")
     ap.add_argument("--registro", default=ARQUIVO_PADRAO, help="arquivo de perfis acessados (padrão: %(default)s)")
+    ap.add_argument("--token", help="token da sua sessão logada no vsco.co para a pesquisa "
+                                    "(padrão: variável VSCO_TOKEN ou o arquivo vsco_sessao.txt)")
     args = ap.parse_args()
     aplicar_rede_args(args)
     with RegistroPerfis(args.registro) as registro:
@@ -100,7 +185,7 @@ def listar_perfis(args, registro, token, largura, fila, listando):
     à frente do download. Só manda eventos para `fila`: quem imprime e grava no registro é o consumidor."""
     produzidos, seen = 0, set()
     try:
-        for r in iter_search(args.termo, token):
+        for r in iter_resultados(args, token):
             username, site_id = r.get("siteSubDomain"), r.get("siteId")
             if not username or not site_id or site_id in seen:
                 continue
@@ -160,6 +245,8 @@ def pesquisar(args, registro):
             if tipo == "fim":
                 break
             if tipo == "excecao":
+                if isinstance(evento[1], ErroAutenticacao):
+                    sys.exit(f"\nErro de autenticação na pesquisa: {evento[1]}")
                 raise evento[1]
             if tipo == "conhecido":
                 known += 1

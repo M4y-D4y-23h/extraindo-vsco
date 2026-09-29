@@ -37,7 +37,7 @@ HTML = os.path.join(AQUI, "painel.html")
 PORTA_PADRAO = 8765
 TOKEN = secrets.token_urlsafe(16)  # exigido nos POSTs: outro site aberto no navegador não consegue comandar o painel
 SAIDA_BLOQUEIO = 3  # o mesmo de vsco_dl.SAIDA_BLOQUEIO
-NAO_SAO_LISTAS = {"perfis_acessados.txt", "pasta_destino.txt"}
+NAO_SAO_LISTAS = {"perfis_acessados.txt", "pasta_destino.txt", "vsco_sessao.txt"}
 porta = PORTA_PADRAO
 
 
