@@ -1,0 +1,3 @@
+# Bibliotecas Python do projeto, uma por linha (formato do pip). O Painel.bat instala e atualiza
+# tudo o que estiver aqui a cada abertura (ver dependencias.py). Hoje os scripts só usam a
+# biblioteca padrão do Python, por isso não há nenhuma.

@@ -51,6 +51,7 @@ import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
+import dependencias
 from pasta_destino import Destino
 from registro_perfis import ARQUIVO_PADRAO, RegistroPerfis
 
@@ -64,6 +65,7 @@ SAIDA_BLOQUEIO = 3  # código de saída quando o Cloudflare bloqueia (p/ parar l
 
 # O Cloudflare do vsco.co bloqueia o fingerprint TLS do Python (urllib/requests -> 403),
 # mas aceita o curl. Por isso todas as requisições passam pelo curl.
+dependencias.preparar_path()  # acha o curl/ffmpeg instalados pelo Painel.bat (ver dependencias.py)
 CURL = shutil.which("curl") or sys.exit("curl não encontrado no PATH.")
 COOKIE_JAR = os.path.join(tempfile.gettempdir(), f"vsco_cookies_{os.getpid()}.txt")
 STATUS_LOTE = ".curl_status.tmp"  # criado dentro da pasta de saída enquanto um lote baixa

@@ -20,10 +20,45 @@ Principais características:
 
 ## Requisitos
 
-- Python 3.8+ (só biblioteca padrão, nada para instalar com `pip`)
-- `ffmpeg` no PATH — opcional, só necessário para vídeos em HLS (`.m3u8`)
+O **`Painel.bat` instala o que faltar e atualiza tudo a cada abertura** (ver abaixo). O projeto usa:
 
+- Python 3.8+ (hoje só a biblioteca padrão; bibliotecas extras ficam no `requirements.txt`)
+- `curl` **8.3 ou mais novo** (o script confere a versão)
+- `ffmpeg` — opcional, só necessário para vídeos em HLS (`.m3u8`)
+
+> Todas as requisições passam pelo `curl` porque o Cloudflare do vsco.co bloqueia o fingerprint
 > TLS do Python (`urllib`/`requests` recebem 403).
+
+### Instalação e atualização automática (`Painel.bat`)
+
+Toda vez que o `Painel.bat` abre, antes do painel, ele usa o **winget** (Gerenciador de Pacotes do
+Windows) e o `pip`:
+
+1. **Python**: se não houver Python 3.8+, instala o pacote `Python.Python.3.14` do winget, só para o
+   seu usuário. Se já houver, atualiza dentro da mesma versão (ex.: 3.14.6 → 3.14.7); se esse Python
+   foi instalado para todos os usuários, a atualização pode pedir permissão de administrador.
+2. **Programas** (`dependencias.py`, lista `PROGRAMAS`): `curl` (pacote `cURL.cURL`) e `ffmpeg`
+   (pacote `Gyan.FFmpeg`). O que falta, ou está abaixo da versão mínima, é instalado; o que veio do
+   winget é atualizado. Um programa que não veio do winget e atende à versão mínima (ex.: o `curl` do
+   Windows) é usado como está.
+3. **Bibliotecas Python** (`requirements.txt`): `pip install --upgrade -r requirements.txt`. Hoje o
+   arquivo não lista nenhuma.
+
+Se faltar algo obrigatório (Python 3.8+ ou `curl` 8.3+), a janela mostra o motivo e o painel não abre.
+O `ffmpeg` é opcional: se não der para instalar, o painel abre e só os vídeos HLS falham. Sem internet
+(ou sem winget), nada é instalado nem atualizado, mas o painel abre se o necessário já estiver instalado.
+
+Um programa recém-instalado pelo winget só entra no PATH das janelas abertas depois. Por isso os
+scripts procuram o `curl`/`ffmpeg` também no PATH gravado no Windows e nas pastas do winget, e usam o
+primeiro que atende à versão mínima.
+
+**Para acrescentar uma dependência no futuro:**
+
+- biblioteca Python: uma linha no `requirements.txt` (ex.: `requests>=2.32`);
+- programa externo: uma linha em `PROGRAMAS` no `dependencias.py`, com o comando, o id do pacote no
+  winget, para que serve e a versão mínima (ex.: `Programa("curl", "cURL.cURL", "...", minimo=(8, 3))`).
+
+Para só instalar/atualizar, sem abrir o painel: `python dependencias.py`.
 
 ---
 
@@ -35,6 +70,8 @@ Principais características:
 | `vsco_search_dl.py` | Pesquisa um termo e baixa as fotos dos N primeiros perfis **novos** que tenham mídia. |
 | `registro_perfis.py` | Lê/grava o registro de perfis acessados (`perfis_acessados.txt`). |
 | `Painel.bat` / `painel.py` / `painel.html` | Painel no navegador para rodar tudo sem digitar comandos. |
+| `dependencias.py` | Instala/atualiza as dependências (rodado pelo `Painel.bat`). Tem a lista dos programas externos. |
+| `requirements.txt` | Bibliotecas Python do projeto, instaladas/atualizadas pelo `pip` (hoje nenhuma). |
 | `pasta_destino.py` | Mostra/define a pasta padrão onde os downloads são salvos (`pasta_destino.txt`). |
 | `pasta_destino.txt` | Criado por `pasta_destino.py`. Uma linha com a pasta base (pode ser editado no Bloco de Notas). |
 | `perfis_acessados.txt` | Criado automaticamente na primeira execução. Histórico de perfis já processados. |
@@ -46,7 +83,8 @@ Principais características:
 
 ### Painel (o jeito mais simples)
 
-Dê **dois cliques em `Painel.bat`** (ou rode `python painel.py`). O navegador abre em
+Dê **dois cliques em `Painel.bat`** (ou rode `python painel.py`). O `Painel.bat` primeiro instala/atualiza
+as dependências (ver *Requisitos*); o `python painel.py` abre direto. O navegador abre em
 `http://127.0.0.1:8765` com tudo numa tela só:
 
 - **Onde salvar**: mostra/troca a pasta padrão (digitando ou pelo botão *Escolher pasta…*) e abre a
