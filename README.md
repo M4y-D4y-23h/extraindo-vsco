@@ -61,6 +61,9 @@ Detalhes:
 - Deixe a janela preta do `Painel.bat` aberta; fechar ela encerra o painel (e o download em andamento).
 - Só roda uma execução por vez: duas ao mesmo tempo dobrariam o ritmo de requisições.
 - Numa lista, um bloqueio confirmado (código 3) interrompe a lista inteira e o painel diz de qual item retomar.
+- *Pesquisa* e *Lista* de pesquisas se repetem sozinhas: ao terminar sem erro, o painel espera 10 s e roda
+  tudo de novo, indefinidamente. Qualquer item que termine com erro encerra a repetição. Para parar antes:
+  *Parar agora* ou *Parar após a rodada atual* / *Parar após o item atual*.
 - O painel só aceita conexões do próprio computador. Se a porta 8765 estiver ocupada, ele usa a seguinte.
 
 Os comandos abaixo continuam funcionando do mesmo jeito para quem preferir o terminal.
@@ -107,7 +110,14 @@ python vsco_search_dl.py isabela -n 25 -o saida --rps 1
 python vsco_search_dl.py isabela --forcar             # ignora o registro
 python vsco_search_dl.py isabela --links-only         # só lista/gera links.txt de cada perfil
 python vsco_search_dl.py isabela --token "SEU_TOKEN"  # pesquisa com a sua sessão logada (ver abaixo)
+python vsco_search_dl.py isabela --intervalo 30       # repete a cada 30 s em vez de 10 s
+python vsco_search_dl.py isabela --uma-vez            # roda uma vez só, sem repetir
 ```
+
+**Repetição automática**: ao terminar uma rodada sem erro, o script espera `--intervalo` segundos
+(padrão 10) e roda a pesquisa de novo, com os mesmos valores, indefinidamente. Qualquer erro encerra a
+repetição: perfil com erro ao listar, foto que falhou, erro de autenticação, bloqueio ou qualquer exceção.
+`Ctrl+C` também encerra.
 
 ### Erro de autenticação na pesquisa
 
@@ -148,7 +158,7 @@ seguir para a próxima variação e continuar batendo no site.
 ```powershell
 # como termo de pesquisa (5 perfis novos por variação)
 foreach ($v in Get-Content variacoes_isabela.txt) {
-    python vsco_search_dl.py $v -n 5 -o busca_isabela
+    python vsco_search_dl.py $v --uma-vez -n 5 -o busca_isabela
     if ($LASTEXITCODE -eq 3) { break }
 }
 
@@ -172,13 +182,15 @@ foreach ($v in Get-Content variacoes_isabela.txt) {
 | `--registro ARQ` | ambos | Usa outro arquivo de registro (padrão: `perfis_acessados.txt` ao lado dos scripts) |
 | `--links-only` | ambos | Só gera `links.txt`, sem baixar (não grava no registro) |
 | `--token TOKEN` | busca | Token da sua sessão logada para a pesquisa (padrão: `VSCO_TOKEN` ou `vsco_sessao.txt`) |
+| `--intervalo S` | busca | Segundos de espera entre uma rodada e a próxima (padrão 10) |
+| `--uma-vez` | busca | Roda uma vez só, sem a repetição automática |
 
 ### Códigos de saída
 
 | Código | Significado |
 |---|---|
 | 0 | Terminou (pode ter havido falhas pontuais, listadas na saída) |
-| 1 | Erro (perfil inexistente, perfil já no registro, curl ausente, pesquisa exigindo login etc.) |
+| 1 | Erro (perfil inexistente, perfil já no registro, curl ausente, pesquisa exigindo login etc.). Na pesquisa, também quando uma rodada teve perfil com erro ao listar ou foto que falhou (encerra a repetição) |
 | 3 | **Bloqueado pelo Cloudflare** (confirmado pela requisição de teste): tudo foi interrompido; rode de novo mais tarde |
 
 ---

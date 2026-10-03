@@ -305,7 +305,9 @@ function mostrarEstado(e) {
   const st = $("status");
   if (e.rodando) {
     const item = e.item && e.item.n > 1 ? ` — item ${e.item.i}/${e.item.n}` : "";
-    st.textContent = (e.parando ? "Parando" : "Baixando") + item + ` · ${e.decorrido}`;
+    const rodada = e.repetir ? ` — rodada ${e.rodada}` : "";
+    const fase = e.parando ? "Parando" : e.espera !== null ? `Próxima rodada em ${e.espera} s` : "Baixando";
+    st.textContent = fase + rodada + item + ` · ${e.decorrido}`;
     st.className = "pilula rodando";
   } else if (e.codigo === null || e.codigo === undefined) {
     st.textContent = "Pronto"; st.className = "pilula";
@@ -319,7 +321,8 @@ function mostrarEstado(e) {
   $("registro").textContent = e.registro.toLocaleString("pt-BR");
   $("btnIniciar").disabled = e.rodando;
   $("btnParar").disabled = !e.rodando;
-  $("btnPararDepois").hidden = !(e.rodando && e.item && e.item.n > 1);
+  $("btnPararDepois").hidden = !(e.rodando && (e.repetir || (e.item && e.item.n > 1)));
+  $("btnPararDepois").textContent = e.repetir && !(e.item && e.item.n > 1) ? "Parar após a rodada atual" : "Parar após o item atual";
   $("btnPararDepois").disabled = !!e.parando;
 }
 let ocupado = false;

@@ -12,6 +12,8 @@ mesmo tempo dobrariam o ritmo de requisições), e mostra a saída deles ao vivo
   - Parar: envia Ctrl+Break ao script, que encerra como num Ctrl+C (o curl é interrompido, arquivos
     parciais são apagados e o resumo é impresso). Se não responder em 15 s, é encerrado à força.
   - Lista: roda um item por vez; um bloqueio confirmado (código 3) interrompe a lista inteira.
+  - Pesquisa (e lista de pesquisas): ao terminar sem erro, espera INTERVALO_REPETICAO segundos e roda
+    tudo de novo, indefinidamente. Qualquer item que termine com código diferente de 0 encerra a repetição.
 
 Opções: --porta N (padrão 8765), --sem-navegador
 """
@@ -37,6 +39,7 @@ HTML = os.path.join(AQUI, "painel.html")
 PORTA_PADRAO = 8765
 TOKEN = secrets.token_urlsafe(16)  # exigido nos POSTs: outro site aberto no navegador não consegue comandar o painel
 SAIDA_BLOQUEIO = 3  # o mesmo de vsco_dl.SAIDA_BLOQUEIO
+INTERVALO_REPETICAO = 10  # segundos entre uma rodada de pesquisa e a próxima
 NAO_SAO_LISTAS = {"perfis_acessados.txt", "pasta_destino.txt", "vsco_sessao.txt"}
 porta = PORTA_PADRAO
 
@@ -104,46 +107,74 @@ class Tarefa:
         self.thread = self.proc = None
         self.parar_agora = self.parar_depois = False
         self.titulo, self.item, self.inicio, self.fim, self.codigo = "", None, None, None, None
+        self.repetir, self.rodada, self.proxima = False, 0, None
+        self._acordar = threading.Event()  # interrompe a espera entre rodadas quando pedem para parar
 
     @property
     def rodando(self):
         return bool(self.thread and self.thread.is_alive())
 
-    def iniciar(self, titulo, comandos):
+    def iniciar(self, titulo, comandos, repetir=False):
         with self._lock:
             if self.rodando:
                 raise ValueError("Já existe uma execução em andamento.")
             self.parar_agora = self.parar_depois = False
             self.titulo, self.item, self.codigo = titulo, None, None
             self.inicio, self.fim = time.time(), None
+            self.repetir, self.rodada, self.proxima = repetir, 0, None
+            self._acordar.clear()
             self.thread = threading.Thread(target=self._rodar, args=(comandos,), daemon=True)
             self.thread.start()
 
     def _rodar(self, comandos):
-        total = len(comandos)
         LOG.linha(f"\n##### {self.titulo} — início {time.strftime('%d/%m %H:%M:%S')}")
         try:
-            for i, (nome, argv) in enumerate(comandos, 1):
+            while True:
+                self.rodada += 1
+                if self.repetir:
+                    LOG.linha(f"\n##### Rodada {self.rodada} — {time.strftime('%d/%m %H:%M:%S')}")
+                erro = self._rodada(comandos)
+                if not self.repetir or self.parar_agora or self.parar_depois:
+                    break
+                if erro is not None:
+                    LOG.linha(f"*** Terminou com erro (código {erro}): repetição encerrada.")
+                    self.codigo = erro
+                    break
+                LOG.linha(f">>> Próxima rodada em {INTERVALO_REPETICAO} s.")
+                self.item, self.proxima = None, time.time() + INTERVALO_REPETICAO
+                self._acordar.wait(INTERVALO_REPETICAO)
+                self.proxima = None
                 if self.parar_agora or self.parar_depois:
-                    LOG.linha(f">>> Parado a pedido antes de: {nome}")
-                    break
-                self.item = {"i": i, "n": total, "nome": nome}
-                prefixo = f"[{i}/{total}] " if total > 1 else ""
-                LOG.linha(f"\n===== {prefixo}{nome}")
-                self.codigo = self._executar(argv)
-                if self.codigo == SAIDA_BLOQUEIO:
-                    if total > 1:
-                        LOG.linha("*** Bloqueio confirmado: a lista foi interrompida. "
-                                  f"Para retomar, comece do item {i}.")
-                    break
-                if self.parar_agora:
+                    LOG.linha(">>> Parado a pedido antes da próxima rodada.")
                     break
         except Exception as ex:
             LOG.linha(f"*** Erro no painel: {ex}")
             self.codigo = -1
         finally:
-            self.proc, self.fim = None, time.time()
+            self.proc, self.proxima, self.fim = None, None, time.time()
             LOG.linha(f"##### Fim — {duracao(self.fim - self.inicio)}")
+
+    def _rodada(self, comandos):
+        """Roda a lista de comandos uma vez. Devolve o primeiro código de saída diferente de 0, ou None."""
+        total, erro = len(comandos), None
+        for i, (nome, argv) in enumerate(comandos, 1):
+            if self.parar_agora or self.parar_depois:
+                LOG.linha(f">>> Parado a pedido antes de: {nome}")
+                break
+            self.item = {"i": i, "n": total, "nome": nome}
+            prefixo = f"[{i}/{total}] " if total > 1 else ""
+            LOG.linha(f"\n===== {prefixo}{nome}")
+            self.codigo = self._executar(argv)
+            if self.codigo != 0 and erro is None:
+                erro = self.codigo
+            if self.codigo == SAIDA_BLOQUEIO:
+                if total > 1:
+                    LOG.linha("*** Bloqueio confirmado: a lista foi interrompida. "
+                              f"Para retomar, comece do item {i}.")
+                break
+            if self.parar_agora:
+                break
+        return erro
 
     def _executar(self, argv):
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
@@ -167,9 +198,11 @@ class Tarefa:
             return
         if depois:
             self.parar_depois = True
+            self._acordar.set()
             LOG.linha(">>> Vai parar quando o item atual terminar.")
             return
         self.parar_agora = True
+        self._acordar.set()
         proc = self.proc
         if proc and proc.poll() is None:
             threading.Thread(target=self._interromper, args=(proc,), daemon=True).start()
@@ -201,7 +234,7 @@ def duracao(seg):
 
 
 def montar(cfg):
-    """Formulário do painel -> (título, [(nome, argv)])."""
+    """Formulário do painel -> (título, [(nome, argv)], repetir). Pesquisas se repetem (ver Tarefa)."""
     modo = cfg.get("modo")
     rps = float(str(cfg.get("rps", 1.5)).replace(",", "."))
     pausa = float(str(cfg.get("pausa", 5)).replace(",", "."))
@@ -215,7 +248,8 @@ def montar(cfg):
     py = [sys.executable, "-u"]
 
     def busca(termo):
-        return f'pesquisa "{termo}"', py + ["vsco_search_dl.py", "-n", str(n), *comuns,
+        # --uma-vez: quem repete é o painel, para valer também numa lista e o Parar cortar a espera
+        return f'pesquisa "{termo}"', py + ["vsco_search_dl.py", "--uma-vez", "-n", str(n), *comuns,
                                             *(["-o", subpasta] if subpasta else []), "--", termo]
 
     def perfil(alvo):
@@ -230,7 +264,7 @@ def montar(cfg):
         if not alvo:
             raise ValueError("Informe o perfil." if modo == "perfil" else "Informe o termo de pesquisa.")
         cmd = perfil(alvo) if modo == "perfil" else busca(alvo)
-        return cmd[0], [cmd]
+        return cmd[0], [cmd], modo == "pesquisa"
     if modo == "lista":
         itens = [l.strip() for l in (cfg.get("lista") or "").splitlines()]
         itens = [l for l in itens if l and not l.startswith("#")]
@@ -242,7 +276,8 @@ def montar(cfg):
         fazer = busca if cfg.get("como") == "pesquisa" else perfil
         itens = itens[inicio - 1:]
         como = "pesquisas" if fazer is busca else "perfis"
-        return f"lista: {len(itens)} {como} (a partir do item {inicio})", [fazer(i) for i in itens]
+        return (f"lista: {len(itens)} {como} (a partir do item {inicio})", [fazer(i) for i in itens],
+                fazer is busca)
     raise ValueError("Modo inválido.")
 
 
@@ -298,6 +333,9 @@ def estado(desde):
         "parando": t.rodando and (t.parar_agora or t.parar_depois),
         "decorrido": duracao((t.fim or time.time()) - t.inicio) if t.inicio else "",
         "codigo": None if t.rodando else t.codigo,
+        "repetir": t.rodando and t.repetir,
+        "rodada": t.rodada,
+        "espera": max(0, round(t.proxima - time.time())) if t.rodando and t.proxima else None,
         "pasta": pasta_destino.ler(),
         "pasta_efetiva": pasta_efetiva(),
         "registro": contar_registro(),
@@ -393,8 +431,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 os.startfile(pasta)
                 self._json({"ok": True})
             elif self.path == "/api/iniciar":
-                titulo, comandos = montar(cfg)
-                TAREFA.iniciar(titulo, comandos)
+                titulo, comandos, repetir = montar(cfg)
+                TAREFA.iniciar(titulo, comandos, repetir)
                 self._json({"ok": True})
             elif self.path == "/api/parar":
                 TAREFA.parar(depois=bool(cfg.get("depois")))

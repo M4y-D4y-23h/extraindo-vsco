@@ -37,6 +37,11 @@ Uso:
   python vsco_search_dl.py isa -n 25 -o saida --rps 1
   python vsco_search_dl.py isa --links-only       # só lista/gera links.txt de cada perfil
   python vsco_search_dl.py isa --forcar           # ignora o registro e baixa de novo
+  python vsco_search_dl.py isa --uma-vez          # roda uma vez só, sem repetir
+
+Repetição: ao terminar uma rodada sem erro, espera --intervalo segundos (padrão 10) e roda de novo,
+  indefinidamente. Qualquer erro encerra: exceção, bloqueio, erro de autenticação, perfil com erro
+  ao listar ou foto que falhou (código de saída 1 nos dois últimos casos). Ctrl+C também encerra.
 
 Pasta de destino: sem -o (ou com -o relativo) tudo vai para dentro da pasta definida com
   python pasta_destino.py "D:\\Fotos VSCO"
@@ -49,6 +54,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import urllib.parse
 
 from pasta_destino import Destino
@@ -171,13 +177,28 @@ def main():
     ap.add_argument("--registro", default=ARQUIVO_PADRAO, help="arquivo de perfis acessados (padrão: %(default)s)")
     ap.add_argument("--token", help="token da sua sessão logada no vsco.co para a pesquisa "
                                     "(padrão: variável VSCO_TOKEN ou o arquivo vsco_sessao.txt)")
+    ap.add_argument("--intervalo", type=float, default=10,
+                    help="segundos de espera entre uma rodada e a próxima (padrão 10)")
+    ap.add_argument("--uma-vez", action="store_true", help="roda uma vez só, sem repetir")
     args = ap.parse_args()
+    if args.intervalo < 0:
+        ap.error("--intervalo precisa ser >= 0")
     aplicar_rede_args(args)
     with RegistroPerfis(args.registro) as registro:
         print(f"Registro: {len(registro)} perfis já acessados em {args.registro}", file=sys.stderr)
         if RITMO.rps:
             print(f"Ritmo: até {RITMO.rps:g} req/s (~{round(RITMO.rps * 3600)} por hora)", file=sys.stderr)
-        pesquisar(args, registro)
+        rodada = 1
+        while True:
+            if not args.uma_vez:
+                print(f"\n##### Rodada {rodada} — {time.strftime('%d/%m %H:%M:%S')}", file=sys.stderr)
+            if not pesquisar(args, registro):
+                sys.exit("\nA rodada terminou com erro: repetição encerrada.")
+            if args.uma_vez:
+                break
+            print(f"\nPróxima rodada em {args.intervalo:g} s (Ctrl+C para parar).", file=sys.stderr)
+            time.sleep(args.intervalo)
+            rodada += 1
 
 
 def listar_perfis(args, registro, token, largura, fila, listando):
@@ -219,6 +240,7 @@ def listar_perfis(args, registro, token, largura, fila, listando):
 
 
 def pesquisar(args, registro):
+    """Uma rodada. Devolve False se algum perfil deu erro ao listar ou teve foto que falhou."""
     largura = None if args.original else LARGURA_MINIMA
     # relida antes de cada perfil: pasta_destino.py pode trocar a pasta durante a execução
     destino = Destino(args.out or f"busca_{args.termo}")
@@ -279,6 +301,7 @@ def pesquisar(args, registro):
             print(f"  perfis com erro pulados: {len(errors)} {errors}", file=sys.stderr)
     if len(done) < args.perfis:
         print(f"  aviso: a pesquisa acabou com só {len(done)} perfis com mídia.", file=sys.stderr)
+    return not errors and not any(failed for *_, failed in done)
 
 
 if __name__ == "__main__":
