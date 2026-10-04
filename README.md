@@ -15,6 +15,9 @@ Principais características:
 - **Retomada**: arquivos que já existem na pasta não são baixados de novo.
 - **Pasta de destino padrão e trocável em execução** (`pasta_destino.py`): define onde tudo é salvo;
   o arquivo é relido antes de cada perfil, então dá para mudar a pasta com o script rodando.
+- **Erros não param a fila** (`erros.log`): perfil apagado/inexistente, foto que falhou etc. são
+  gravados com todos os detalhes no log de erros e a execução segue para o próximo. Só o bloqueio do
+  Cloudflare (código 3) para tudo.
 
 ---
 
@@ -69,6 +72,8 @@ Para só instalar/atualizar, sem abrir o painel: `python dependencias.py`.
 | `vsco_dl.py` | Baixa a galeria de **um** perfil. Também é a biblioteca base usada pelo script de busca. |
 | `vsco_search_dl.py` | Pesquisa um termo e baixa as fotos dos N primeiros perfis **novos** que tenham mídia. |
 | `registro_perfis.py` | Lê/grava o registro de perfis acessados (`perfis_acessados.txt`). |
+| `log_erros.py` | Grava os erros em `erros.log` (ver *Log de erros*). |
+| `erros.log` | Criado no primeiro erro. Um bloco por erro, com data/hora, perfil, URL, código HTTP, saída do curl, o que foi feito e o comando. |
 | `Painel.bat` / `painel.py` / `painel.html` | Painel no navegador para rodar tudo sem digitar comandos. |
 | `dependencias.py` | Instala/atualiza as dependências (rodado pelo `Painel.bat`). Tem a lista dos programas externos. |
 | `requirements.txt` | Bibliotecas Python do projeto, instaladas/atualizadas pelo `pip` (hoje nenhuma). |
@@ -99,8 +104,11 @@ Detalhes:
 - Deixe a janela preta do `Painel.bat` aberta; fechar ela encerra o painel (e o download em andamento).
 - Só roda uma execução por vez: duas ao mesmo tempo dobrariam o ritmo de requisições.
 - Numa lista, um bloqueio confirmado (código 3) interrompe a lista inteira e o painel diz de qual item retomar.
-- *Pesquisa* e *Lista* de pesquisas se repetem sozinhas: ao terminar sem erro, o painel espera 10 s e roda
-  tudo de novo, indefinidamente. Qualquer item que termine com erro encerra a repetição. Para parar antes:
+- Qualquer outro erro (código 1 etc.) **não para nada**: o painel mostra
+  `*** <item>: terminou com erro (código 1), registrado em erros.log; o painel seguiu para o próximo item.`,
+  conta o item como erro e segue para o próximo da fila. O botão **Abrir log de erros** abre o `erros.log`.
+- *Pesquisa* e *Lista* de pesquisas se repetem sozinhas: ao terminar a rodada, o painel espera 10 s e roda
+  tudo de novo, indefinidamente. Só o bloqueio (código 3) encerra a repetição. Para parar antes:
   *Parar agora* ou *Parar após a rodada atual* / *Parar após o item atual*.
 - O painel só aceita conexões do próprio computador. Se a porta 8765 estiver ocupada, ele usa a seguinte.
 
@@ -152,10 +160,11 @@ python vsco_search_dl.py isabela --intervalo 30       # repete a cada 30 s em ve
 python vsco_search_dl.py isabela --uma-vez            # roda uma vez só, sem repetir
 ```
 
-**Repetição automática**: ao terminar uma rodada sem erro, o script espera `--intervalo` segundos
-(padrão 10) e roda a pesquisa de novo, com os mesmos valores, indefinidamente. Qualquer erro encerra a
-repetição: perfil com erro ao listar, foto que falhou, erro de autenticação, bloqueio ou qualquer exceção.
-`Ctrl+C` também encerra.
+**Repetição automática**: ao terminar uma rodada, o script espera `--intervalo` segundos (padrão 10)
+e roda a pesquisa de novo, com os mesmos valores, indefinidamente. Só o bloqueio (código 3) e o
+`Ctrl+C` encerram. Os outros erros (perfil apagado ou com erro ao listar, foto que falhou, erro de
+autenticação, qualquer exceção) vão para o `erros.log`: o perfil com erro é pulado, a pesquisa segue
+para o próximo e a repetição continua. Com `--uma-vez`, uma rodada com erro sai com código 1.
 
 ### Erro de autenticação na pesquisa
 
@@ -191,7 +200,8 @@ O painel e os laços `foreach` passam a usar o arquivo automaticamente. Cuidados
 Cada linha de `variacoes_isabela.txt` pode ser usada como termo de pesquisa ou como username direto.
 Graças ao registro, perfis que aparecem em mais de uma pesquisa só são baixados uma vez.
 O `if ($LASTEXITCODE -eq 3) { break }` encerra o laço inteiro quando vier um bloqueio, em vez de
-seguir para a próxima variação e continuar batendo no site.
+seguir para a próxima variação e continuar batendo no site. Qualquer outro código (ex.: 1, perfil
+apagado) segue para a próxima variação, e o erro fica no `erros.log`.
 
 ```powershell
 # como termo de pesquisa (5 perfis novos por variação)
@@ -227,9 +237,41 @@ foreach ($v in Get-Content variacoes_isabela.txt) {
 
 | Código | Significado |
 |---|---|
-| 0 | Terminou (pode ter havido falhas pontuais, listadas na saída) |
-| 1 | Erro (perfil inexistente, perfil já no registro, curl ausente, pesquisa exigindo login etc.). Na pesquisa, também quando uma rodada teve perfil com erro ao listar ou foto que falhou (encerra a repetição) |
-| 3 | **Bloqueado pelo Cloudflare** (confirmado pela requisição de teste): tudo foi interrompido; rode de novo mais tarde |
+| 0 | Terminou sem erro (inclui perfil já no registro, que só é pulado) |
+| 1 | Erro, gravado no `erros.log`: perfil apagado ou inexistente (HTTP 404), erro ao listar, mídia que falhou, curl ausente, pesquisa exigindo login, exceção inesperada etc. **Não para** o painel, a repetição nem os laços `foreach`: a execução segue para o próximo |
+| 3 | **Bloqueado pelo Cloudflare** (confirmado pela requisição de teste): tudo foi interrompido; rode de novo mais tarde. É o único código que para a fila |
+
+### Log de erros (`erros.log`)
+
+Fica ao lado dos scripts e é criado no primeiro erro. Só entram erros, um bloco por erro, gravado e
+salvo na hora, com tudo o que ajuda a entender o que houve:
+
+- data e hora (com fuso), título do erro e perfil / `site_id` / termo da pesquisa;
+- a mensagem do erro, a URL, o código HTTP, o código e a mensagem do `curl` (com o significado dos
+  mais comuns, ex.: `28 (tempo esgotado)`) e um trecho da resposta do site (título da página ou começo
+  do JSON);
+- nas fotos que falharam, a lista de URLs com o motivo de cada uma (inclusive o último erro das que
+  falharam nas 3 rodadas);
+- o que a execução fez depois (ex.: *perfil pulado (não entrou no registro)*) e o comando que estava
+  rodando (o `--token`, se houver, aparece como `***`);
+- em erros inesperados, o traceback do Python. Se um script terminar com erro sem ter gravado nada
+  (ex.: quebrou ao iniciar), o painel grava o comando, o código de saída e as últimas 30 linhas da saída.
+
+Exemplo, um perfil que foi apagado:
+
+```
+[2026-10-04 03:12:08 -0300] perfil apagado ou inexistente (HTTP 404): vdvdvdvdvdvdgdgg
+    perfil:          vdvdvdvdvdvdgdgg
+    erro:            ErroHTTP: HTTP 404 em https://vsco.co/vdvdvdvdvdvdgdgg/gallery
+    url:             https://vsco.co/vdvdvdvdvdvdgdgg/gallery
+    http:            404
+    resposta:        página: ...
+    o que foi feito: perfil pulado (não entrou no registro)
+    comando:         vsco_dl.py --rps 1.5 --pausa-bloqueio 5 -- vdvdvdvdvdvdgdgg
+```
+
+O bloqueio do Cloudflare (código 3) não entra no log: ele para tudo e a mensagem fica na tela. O
+arquivo só cresce; pode ser apagado a qualquer momento (é recriado no próximo erro).
 
 ---
 

@@ -12,8 +12,12 @@ mesmo tempo dobrariam o ritmo de requisições), e mostra a saída deles ao vivo
   - Parar: envia Ctrl+Break ao script, que encerra como num Ctrl+C (o curl é interrompido, arquivos
     parciais são apagados e o resumo é impresso). Se não responder em 15 s, é encerrado à força.
   - Lista: roda um item por vez; um bloqueio confirmado (código 3) interrompe a lista inteira.
-  - Pesquisa (e lista de pesquisas): ao terminar sem erro, espera INTERVALO_REPETICAO segundos e roda
-    tudo de novo, indefinidamente. Qualquer item que termine com código diferente de 0 encerra a repetição.
+    Qualquer outro erro não para nada: o item é contado como erro e a lista segue para o próximo.
+  - Pesquisa (e lista de pesquisas): ao terminar a rodada, espera INTERVALO_REPETICAO segundos e roda
+    tudo de novo, indefinidamente. Só o bloqueio (código 3) encerra a repetição.
+  - Erros: os scripts gravam cada erro, com os detalhes, em erros.log (ver log_erros.py). Se um item
+    terminar com erro sem ter gravado nada lá (ex.: o script quebrou ao iniciar), o painel grava o
+    comando, o código de saída e as últimas linhas da saída.
 
 Opções: --porta N (padrão 8765), --sem-navegador
 """
@@ -31,6 +35,7 @@ import time
 import urllib.parse
 import webbrowser
 
+import log_erros
 import pasta_destino
 from registro_perfis import ARQUIVO_PADRAO as REGISTRO
 
@@ -39,7 +44,9 @@ HTML = os.path.join(AQUI, "painel.html")
 PORTA_PADRAO = 8765
 TOKEN = secrets.token_urlsafe(16)  # exigido nos POSTs: outro site aberto no navegador não consegue comandar o painel
 SAIDA_BLOQUEIO = 3  # o mesmo de vsco_dl.SAIDA_BLOQUEIO
+SAIDA_INTERROMPIDO = 130  # Ctrl+C/Parar: não é erro
 INTERVALO_REPETICAO = 10  # segundos entre uma rodada de pesquisa e a próxima
+LINHAS_NO_LOG = 30  # linhas finais da saída que o painel grava no erros.log quando o script não gravou nada
 NAO_SAO_LISTAS = {"perfis_acessados.txt", "pasta_destino.txt", "vsco_sessao.txt", "requirements.txt"}
 porta = PORTA_PADRAO
 
@@ -93,6 +100,16 @@ class Log:
                 desde = self.base  # o navegador ficou para trás (ou o painel reiniciou): manda tudo
             return {"desde": desde, "fim": fim, "linhas": self.linhas[desde - self.base:], "atual": self.atual}
 
+    def posicao(self):
+        with self._lock:
+            return self.base + len(self.linhas)
+
+    def ultimas(self, desde, n):
+        """Até n últimas linhas escritas a partir de `desde` (de posicao())."""
+        dados = self.ler(desde)
+        linhas = dados["linhas"] + ([dados["atual"]] if dados["atual"] else [])
+        return linhas[-n:]
+
 
 LOG = Log()
 
@@ -107,7 +124,7 @@ class Tarefa:
         self.thread = self.proc = None
         self.parar_agora = self.parar_depois = False
         self.titulo, self.item, self.inicio, self.fim, self.codigo = "", None, None, None, None
-        self.repetir, self.rodada, self.proxima = False, 0, None
+        self.repetir, self.rodada, self.proxima, self.erros = False, 0, None, 0
         self._acordar = threading.Event()  # interrompe a espera entre rodadas quando pedem para parar
 
     @property
@@ -121,7 +138,7 @@ class Tarefa:
             self.parar_agora = self.parar_depois = False
             self.titulo, self.item, self.codigo = titulo, None, None
             self.inicio, self.fim = time.time(), None
-            self.repetir, self.rodada, self.proxima = repetir, 0, None
+            self.repetir, self.rodada, self.proxima, self.erros = repetir, 0, None, 0
             self._acordar.clear()
             self.thread = threading.Thread(target=self._rodar, args=(comandos,), daemon=True)
             self.thread.start()
@@ -133,12 +150,10 @@ class Tarefa:
                 self.rodada += 1
                 if self.repetir:
                     LOG.linha(f"\n##### Rodada {self.rodada} — {time.strftime('%d/%m %H:%M:%S')}")
-                erro = self._rodada(comandos)
-                if not self.repetir or self.parar_agora or self.parar_depois:
-                    break
-                if erro is not None:
-                    LOG.linha(f"*** Terminou com erro (código {erro}): repetição encerrada.")
-                    self.codigo = erro
+                bloqueado = self._rodada(comandos)
+                if bloqueado and self.repetir:
+                    LOG.linha("*** Bloqueio confirmado (código 3): repetição encerrada.")
+                if bloqueado or not self.repetir or self.parar_agora or self.parar_depois:
                     break
                 LOG.linha(f">>> Próxima rodada em {INTERVALO_REPETICAO} s.")
                 self.item, self.proxima = None, time.time() + INTERVALO_REPETICAO
@@ -149,14 +164,18 @@ class Tarefa:
                     break
         except Exception as ex:
             LOG.linha(f"*** Erro no painel: {ex}")
+            log_erros.registrar("erro no painel", ex=ex, pilha=True, acao="execução encerrada",
+                                **{"execução": self.titulo})
             self.codigo = -1
+            self.erros += 1
         finally:
             self.proc, self.proxima, self.fim = None, None, time.time()
             LOG.linha(f"##### Fim — {duracao(self.fim - self.inicio)}")
 
     def _rodada(self, comandos):
-        """Roda a lista de comandos uma vez. Devolve o primeiro código de saída diferente de 0, ou None."""
-        total, erro = len(comandos), None
+        """Roda a lista de comandos uma vez. Só o bloqueio (código 3) interrompe a lista: com qualquer
+        outro erro ela segue para o próximo item. Devolve True se houve bloqueio."""
+        total = len(comandos)
         for i, (nome, argv) in enumerate(comandos, 1):
             if self.parar_agora or self.parar_depois:
                 LOG.linha(f">>> Parado a pedido antes de: {nome}")
@@ -164,17 +183,38 @@ class Tarefa:
             self.item = {"i": i, "n": total, "nome": nome}
             prefixo = f"[{i}/{total}] " if total > 1 else ""
             LOG.linha(f"\n===== {prefixo}{nome}")
+            log_antes, saida_antes = log_erros.tamanho(), LOG.posicao()
             self.codigo = self._executar(argv)
-            if self.codigo != 0 and erro is None:
-                erro = self.codigo
             if self.codigo == SAIDA_BLOQUEIO:
                 if total > 1:
                     LOG.linha("*** Bloqueio confirmado: a lista foi interrompida. "
                               f"Para retomar, comece do item {i}.")
-                break
+                return True
             if self.parar_agora:
                 break
-        return erro
+            if self.codigo not in (0, SAIDA_INTERROMPIDO):
+                self.erros += 1
+                if self.parar_depois:
+                    acao = "a execução parou a pedido"
+                elif i < total:
+                    acao = "o painel seguiu para o próximo item"
+                elif self.repetir:
+                    acao = f"o painel seguiu para a próxima rodada (em {INTERVALO_REPETICAO} s)"
+                else:
+                    acao = "era o último item; a execução terminou"
+                if log_erros.tamanho() == log_antes:  # o script não gravou nada: grava o que o painel sabe
+                    log_erros.registrar(f"{nome} terminou com erro (código {self.codigo})", acao=acao,
+                                        comando=log_erros.formatar_comando(argv[2:]), **{
+                                            "execução": self.titulo,
+                                            "item": f"{i} de {total}" if total > 1 else None,
+                                            "rodada": self.rodada if self.repetir else None,
+                                            "código de saída": self.codigo,
+                                            f"saída (últimas {LINHAS_NO_LOG} linhas)":
+                                                "\n".join(LOG.ultimas(saida_antes, LINHAS_NO_LOG)),
+                                        })
+                LOG.linha(f"*** {nome}: terminou com erro (código {self.codigo}), registrado em "
+                          f"{os.path.basename(log_erros.ARQUIVO)}; {acao}.")
+        return False
 
     def _executar(self, argv):
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
@@ -333,6 +373,7 @@ def estado(desde):
         "parando": t.rodando and (t.parar_agora or t.parar_depois),
         "decorrido": duracao((t.fim or time.time()) - t.inicio) if t.inicio else "",
         "codigo": None if t.rodando else t.codigo,
+        "erros": t.erros,
         "repetir": t.rodando and t.repetir,
         "rodada": t.rodada,
         "espera": max(0, round(t.proxima - time.time())) if t.rodando and t.proxima else None,
@@ -429,6 +470,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pasta = pasta_efetiva()
                 os.makedirs(pasta, exist_ok=True)
                 os.startfile(pasta)
+                self._json({"ok": True})
+            elif self.path == "/api/abrir-log":
+                if not os.path.exists(log_erros.ARQUIVO):
+                    raise ValueError("Nenhum erro registrado ainda (erros.log não existe).")
+                os.startfile(log_erros.ARQUIVO)
                 self._json({"ok": True})
             elif self.path == "/api/iniciar":
                 titulo, comandos, repetir = montar(cfg)

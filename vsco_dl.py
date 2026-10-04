@@ -15,6 +15,9 @@ Como o site funciona (e por que não precisamos rolar a página):
      w=300 -> 321x480). Por padrão usamos w=300 (~25 KB por foto).
   4. Cada perfil baixado é gravado em perfis_acessados.txt (ver registro_perfis.py); perfis que já
      estão lá são pulados nas próximas execuções.
+  5. Erros (perfil apagado/inexistente, HTTP 404, fotos que falharam, exceções) vão para erros.log
+     com todos os detalhes (ver log_erros.py) e saem com código 1; o painel e os laços seguem para o
+     próximo da fila. Só o bloqueio (código 3) para tudo.
 
 Cuidados com o firewall (Cloudflare) do VSCO:
   - Ritmo global (--rps): TODAS as requisições (página, API, fotos), de todas as threads, passam por
@@ -48,10 +51,12 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 import dependencias
+import log_erros
 from pasta_destino import Destino
 from registro_perfis import ARQUIVO_PADRAO, RegistroPerfis
 
@@ -279,6 +284,51 @@ def duracao(seg):
 
 # ---------------------------------------------------------------- requisições
 
+# códigos de saída do curl mais comuns, para o log de erros
+_ERROS_CURL = {"6": "não achou o endereço (DNS)", "7": "não conectou", "28": "tempo esgotado",
+               "35": "falha no TLS", "52": "resposta vazia", "56": "conexão interrompida"}
+
+
+def descrever_curl(codigo):
+    codigo = str(codigo)
+    return f"curl código {codigo}" + (f" ({_ERROS_CURL[codigo]})" if codigo in _ERROS_CURL else "")
+
+
+def _resumir_corpo(corpo):
+    """Trecho da resposta de erro para o log: o <title> de uma página HTML ou o começo de um JSON/texto."""
+    m = re.search(rb"<title[^>]*>(.*?)</title>", corpo, re.S | re.I)
+    if m:
+        return "página: " + " ".join(m.group(1).decode("utf-8", "replace").split())
+    texto = " ".join(corpo[:2000].decode("utf-8", "replace").split())
+    if "<html" in texto.lower():
+        return "página HTML sem título"
+    return texto[:300] + ("…" if len(texto) > 300 else "")
+
+
+class ErroHTTP(RuntimeError):
+    """Resposta HTTP de erro (ou falha do curl) depois das tentativas. A mensagem continua sendo
+    "HTTP <código> em <url> ..."; os atributos vão para o log de erros (log_erros.py)."""
+
+    def __init__(self, code, url, curl_codigo, curl_saida, corpo):
+        self.code, self.url, self.curl_codigo, self.curl_saida = code or "?", url, curl_codigo, curl_saida
+        self.resposta = _resumir_corpo(corpo)
+        super().__init__(f"HTTP {self.code} em {url} {curl_saida}".rstrip())
+
+    def campos_log(self):
+        curl = f"{descrever_curl(self.curl_codigo)}: {self.curl_saida}" if self.curl_codigo else None
+        return {"url": self.url, "http": self.code, "curl": curl, "resposta": self.resposta}
+
+
+def titulo_erro_perfil(ex, padrao):
+    """Título do log para um erro ao abrir/listar um perfil: 404/410 = perfil apagado ou inexistente."""
+    code = getattr(ex, "code", None)
+    if code in ("404", "410"):
+        return f"perfil apagado ou inexistente (HTTP {code})"
+    if isinstance(ex, LookupError):
+        return "perfil não encontrado na página"
+    return padrao
+
+
 def fetch(url, headers=None, retries=3):
     """GET via curl (página/API), respeitando o RITMO. Retorna o corpo em bytes."""
     cmd = [CURL, "-sS", "-L", "--compressed", "--max-time", "120", "-A", UA,
@@ -301,7 +351,7 @@ def fetch(url, headers=None, retries=3):
             checar_parada()
             attempt += 1
             continue
-        raise RuntimeError(f"HTTP {code or '?'} em {url} {r.stderr.decode(errors='replace').strip()}")
+        raise ErroHTTP(code, url, r.returncode, r.stderr.decode(errors="replace").strip(), corpo)
 
 
 def load_profile(username):
@@ -414,14 +464,14 @@ def _checar_curl():
         sys.exit(f"É preciso curl 8.3 ou mais novo (encontrado: {r.stdout.splitlines()[0] if r.stdout else CURL}).")
 
 
-def _baixar_fatia(fatia, outdir, progresso):
+def _baixar_fatia(fatia, outdir, progresso, motivos):
     """Baixa `fatia` [(entry, path)] com UM processo curl: em série, na mesma conexão, no ritmo do
     RITMO (vagas já reservadas por quem chama). O resultado de cada arquivo é lido ao vivo, então um
     bloqueio (aqui ou em outra thread) mata o curl na hora.
 
-    Devolve (retentar, repetir): `retentar` são falhas transitórias, para outra rodada com espera;
-    `repetir` são os itens interrompidos por uma pausa de bloqueio que não se confirmou, para
-    baixar logo em seguida."""
+    Devolve (retentar, repetir): `retentar` são falhas transitórias, para outra rodada com espera
+    (o motivo de cada uma fica em `motivos[path]`, para o log de erros); `repetir` são os itens
+    interrompidos por uma pausa de bloqueio que não se confirmou, para baixar logo em seguida."""
     por_nome = {os.path.basename(path) + ".part": (entry, path) for entry, path in fatia}
     config = "".join(f'url = "{entry[1]}"\noutput = "{nome}"\n' for nome, (entry, _) in por_nome.items())
     status = os.path.join(outdir, STATUS_LOTE)
@@ -466,6 +516,7 @@ def _baixar_fatia(fatia, outdir, progresso):
                         if checar_resposta(code, corpo, entry[1]):
                             repetir.append((entry, path))
                         elif exitcode != "0" or code in ("429", "500", "502", "503", "504"):
+                            motivos[path] = f"HTTP {code}" + (f", {descrever_curl(exitcode)}" if exitcode != "0" else "")
                             retentar.append((entry, path))
                         else:
                             progresso(f"erro (HTTP {code})", entry[1])
@@ -494,15 +545,18 @@ def _baixar_fatia(fatia, outdir, progresso):
             raise RuntimeError(f"curl falhou (código {proc.returncode}): {erros.read().decode(errors='replace').strip()}")
     if interrompido:
         return retentar, repetir + list(por_nome.values())
+    for _, path in por_nome.values():
+        motivos[path] = f"o curl terminou sem baixar ({descrever_curl(proc.returncode)})"
     return retentar + list(por_nome.values()), []  # sem linha de status = curl morreu antes: tenta de novo
 
 
-def download_all(entries, outdir, links_only=False, ceder_vez=None):
+def download_all(entries, outdir, links_only=False, ceder_vez=None, contexto=None):
     """Grava links.txt e baixa tudo no ritmo global. Retorna (ok, pulados, falhas).
 
     ceder_vez: função opcional; enquanto devolver True, o lote é dividido em fatias de PAGE_SIZE
     fotos para que outra thread (ex.: a listagem do próximo perfil) consiga vagas no RITMO entre
-    uma fatia e outra. Sem ela, o perfil inteiro sai de um único processo curl."""
+    uma fatia e outra. Sem ela, o perfil inteiro sai de um único processo curl.
+    contexto: campos para o log de erros (perfil, site_id...), onde vão as mídias que falharam."""
     os.makedirs(outdir, exist_ok=True)
     links_path = os.path.join(outdir, "links.txt")
     with open(links_path, "w", encoding="utf-8") as f:
@@ -519,12 +573,14 @@ def download_all(entries, outdir, links_only=False, ceder_vez=None):
         estimativa = f", tempo estimado {RITMO.estimar(len(alvos))}" if RITMO.rps else ""
         _log(f"  {len(alvos)} a baixar ({skipped} já existem){estimativa}")
     contagem = {"ok": 0, "falhas": 0}
+    falhas, motivos = [], {}
 
     def progresso(status, info=None):
         if status == "ok":
             contagem["ok"] += 1
         else:
             contagem["falhas"] += 1
+            falhas.append(f"{info}  ->  {status}")
             _log(f"\n  {status}: {info}")
         feitos = skipped + contagem["ok"] + contagem["falhas"]
         resta = f"  resta {RITMO.estimar(len(entries) - feitos)}" if RITMO.rps and feitos < len(entries) else ""
@@ -546,11 +602,11 @@ def download_all(entries, outdir, links_only=False, ceder_vez=None):
             n = PAGE_SIZE if ceder_vez and ceder_vez() else len(pendentes)
             fatia, pendentes = pendentes[:n], pendentes[n:]
             RITMO.reservar(len(fatia))  # durante uma pausa de bloqueio, espera aqui
-            falhas, repetir = _baixar_fatia(fatia, outdir, progresso)
-            diretos += falhas
+            retentar, repetir = _baixar_fatia(fatia, outdir, progresso, motivos)
+            diretos += retentar
             pendentes = repetir + pendentes
-    for entry, _ in diretos:
-        progresso("erro (falhou após 3 rodadas)", entry[1])
+    for entry, path in diretos:
+        progresso(f"erro (falhou após 3 rodadas; última: {motivos.get(path, '?')})", entry[1])
 
     for entry, path in hls:
         if not shutil.which("ffmpeg"):
@@ -566,6 +622,11 @@ def download_all(entries, outdir, links_only=False, ceder_vez=None):
             progresso(f"erro (ffmpeg {r.returncode})", entry[1])
     if alvos:
         print(file=sys.stderr)
+    if falhas:
+        log_erros.registrar(f"{len(falhas)} de {len(entries)} mídias não baixaram", **(contexto or {}),
+                            pasta=outdir, falhas="\n".join(falhas),
+                            acao="o perfil não entrou no registro: na próxima execução só as mídias que "
+                                 "faltam são baixadas")
     return contagem["ok"], skipped, contagem["falhas"]
 
 
@@ -613,17 +674,28 @@ def main():
 
     try:
         site_id, token = load_profile(username)
-    except (LookupError, RuntimeError) as ex:  # RuntimeError = HTTP 404 etc. (perfil inexistente)
-        sys.exit(f"Erro: {ex}")
+    except (LookupError, RuntimeError) as ex:  # ErroHTTP 404 = perfil apagado ou inexistente
+        log_erros.registrar(f"{titulo_erro_perfil(ex, 'erro ao abrir o perfil')}: {username}", ex=ex,
+                            perfil=username, acao="perfil pulado (não entrou no registro)")
+        sys.exit(f"Erro: {ex}\n  (registrado em {log_erros.ARQUIVO})")
     with RegistroPerfis(args.registro) as registro:
         if site_id in registro and not args.forcar:
-            sys.exit(f"Perfil {username} já está em {args.registro}; pulado (use --forcar para baixar de novo).")
+            _log(f"Perfil {username} já está em {args.registro}; pulado (use --forcar para baixar de novo).")
+            return
         _log(f"Perfil {username} (site_id={site_id}) — listando mídias...")
-        entries = collect_entries(site_id, token, username, largura=None if args.original else LARGURA_MINIMA)
-        ok, skipped, failed = download_all(entries, outdir, args.links_only)
+        try:
+            entries = collect_entries(site_id, token, username, largura=None if args.original else LARGURA_MINIMA)
+        except (RuntimeError, ValueError) as ex:  # ValueError = JSON inválido na resposta da API
+            log_erros.registrar(f"{titulo_erro_perfil(ex, 'erro ao listar as mídias')}: {username}", ex=ex,
+                                perfil=username, site_id=site_id, acao="perfil pulado (não entrou no registro)")
+            sys.exit(f"Erro ao listar as mídias: {ex}\n  (registrado em {log_erros.ARQUIVO})")
+        ok, skipped, failed = download_all(entries, outdir, args.links_only,
+                                           contexto={"perfil": username, "site_id": site_id})
         # só registra quando nada falhou: assim uma próxima execução ainda completa o que faltou
         if not args.links_only and not failed:
             registro.registrar(site_id, username, "baixado" if entries else "vazio", len(entries))
+    if failed:
+        sys.exit(f"Concluído em {outdir}, mas {failed} mídia(s) falharam (detalhes em {log_erros.ARQUIVO}).")
     _log(f"Concluído em {outdir}")
 
 
@@ -633,7 +705,8 @@ def cleanup():
 
 
 def rodar(main_fn):
-    """Executa o main tratando o bloqueio: mensagem clara e código de saída SAIDA_BLOQUEIO."""
+    """Executa o main tratando o bloqueio (mensagem clara e código de saída SAIDA_BLOQUEIO) e os
+    erros inesperados (traceback na tela e no log de erros, código 1)."""
     if hasattr(signal, "SIGBREAK"):  # Ctrl+Break (é o que o painel.py envia para parar) = Ctrl+C
         signal.signal(signal.SIGBREAK, signal.default_int_handler)
     try:
@@ -644,6 +717,10 @@ def rodar(main_fn):
     except KeyboardInterrupt:
         _log("\nInterrompido. Rode de novo para continuar de onde parou.")
         sys.exit(130)
+    except Exception as ex:
+        traceback.print_exc()
+        log_erros.registrar("erro inesperado", ex=ex, pilha=True, acao="script encerrado com código 1")
+        sys.exit(f"  (registrado em {log_erros.ARQUIVO})")
     finally:
         cleanup()
 

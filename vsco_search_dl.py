@@ -39,9 +39,11 @@ Uso:
   python vsco_search_dl.py isa --forcar           # ignora o registro e baixa de novo
   python vsco_search_dl.py isa --uma-vez          # roda uma vez só, sem repetir
 
-Repetição: ao terminar uma rodada sem erro, espera --intervalo segundos (padrão 10) e roda de novo,
-  indefinidamente. Qualquer erro encerra: exceção, bloqueio, erro de autenticação, perfil com erro
-  ao listar ou foto que falhou (código de saída 1 nos dois últimos casos). Ctrl+C também encerra.
+Repetição: ao terminar uma rodada, espera --intervalo segundos (padrão 10) e roda de novo,
+  indefinidamente. Só o bloqueio (código 3) e o Ctrl+C encerram. Os outros erros (perfil apagado ou
+  com erro ao listar, foto que falhou, erro de autenticação, exceção) vão para erros.log com todos
+  os detalhes (ver log_erros.py): o perfil com erro é pulado e a pesquisa segue para o próximo.
+  Com --uma-vez, uma rodada com erro sai com código 1.
 
 Pasta de destino: sem -o (ou com -o relativo) tudo vai para dentro da pasta definida com
   python pasta_destino.py "D:\\Fotos VSCO"
@@ -55,12 +57,14 @@ import re
 import sys
 import threading
 import time
+import traceback
 import urllib.parse
 
+import log_erros
 from pasta_destino import Destino
 from registro_perfis import ARQUIVO_PADRAO, RegistroPerfis
 from vsco_dl import (LARGURA_MINIMA, RITMO, Bloqueado, add_rede_args, collect_entries, download_all,
-                     aplicar_rede_args, fetch, load_profile, rodar)
+                     aplicar_rede_args, fetch, load_profile, rodar, titulo_erro_perfil)
 
 SEARCH_API = "https://vsco.co/api/2.0/search/grids"
 SEARCH_PAGE = "https://vsco.co/search/people/"
@@ -192,21 +196,42 @@ def main():
         while True:
             if not args.uma_vez:
                 print(f"\n##### Rodada {rodada} — {time.strftime('%d/%m %H:%M:%S')}", file=sys.stderr)
-            if not pesquisar(args, registro):
-                sys.exit("\nA rodada terminou com erro: repetição encerrada.")
+            acao = "rodada encerrada" + ("" if args.uma_vez else f"; nova rodada em {args.intervalo:g} s")
+            try:
+                ok = pesquisar(args, registro)
+            except Bloqueado:
+                raise  # código 3: para tudo
+            except ErroAutenticacao as ex:
+                print(f"\nErro de autenticação na pesquisa: {ex}", file=sys.stderr)
+                log_erros.registrar(f'erro de autenticação na pesquisa "{args.termo}"', ex=ex,
+                                    pesquisa=args.termo, acao=acao)
+                ok = False
+            except Exception as ex:
+                traceback.print_exc()
+                log_erros.registrar(f'erro inesperado na pesquisa "{args.termo}"', ex=ex, pilha=True,
+                                    pesquisa=args.termo, acao=acao)
+                ok = False
             if args.uma_vez:
+                if not ok:
+                    sys.exit(f"\nA pesquisa terminou com erro (detalhes em {log_erros.ARQUIVO}).")
                 break
+            if not ok:
+                print(f"\nA rodada teve erros (detalhes em {log_erros.ARQUIVO}); a repetição continua.",
+                      file=sys.stderr)
             print(f"\nPróxima rodada em {args.intervalo:g} s (Ctrl+C para parar).", file=sys.stderr)
             time.sleep(args.intervalo)
             rodada += 1
 
 
-def listar_perfis(args, registro, token, largura, fila, listando):
+def listar_perfis(args, registro, token, largura, fila, listando, encerrar):
     """Produtor (thread): percorre a pesquisa e lista as mídias dos perfis novos, no máximo um perfil
-    à frente do download. Só manda eventos para `fila`: quem imprime e grava no registro é o consumidor."""
+    à frente do download. Só manda eventos para `fila`: quem imprime e grava no registro é o consumidor.
+    `encerrar` é setado quando a rodada acaba (inclusive por erro): o produtor para no próximo perfil."""
     produzidos, seen = 0, set()
     try:
         for r in iter_resultados(args, token):
+            if encerrar.is_set():
+                return
             username, site_id = r.get("siteSubDomain"), r.get("siteId")
             if not username or not site_id or site_id in seen:
                 continue
@@ -220,7 +245,7 @@ def listar_perfis(args, registro, token, largura, fila, listando):
             except Bloqueado:
                 raise
             except Exception as ex:
-                fila.put(("erro", username, ex))
+                fila.put(("erro", username, site_id, ex))
                 continue
             if not entries:
                 fila.put(("vazio", username, site_id))
@@ -231,7 +256,12 @@ def listar_perfis(args, registro, token, largura, fila, listando):
             fila.put(("perfil", username, site_id, entries, avisos, mais))
             if not mais:
                 break
-            fila.join()  # espera o consumidor pegar este perfil antes de listar o próximo
+            # = fila.join() (espera o consumidor pegar este perfil antes de listar o próximo), mas
+            # desiste se a rodada acabou com erro: aí ninguém mais vai pegar nada da fila
+            while fila.unfinished_tasks and not encerrar.wait(0.2):
+                pass
+            if encerrar.is_set():
+                return
         fila.put(("fim",))
     except BaseException as ex:
         fila.put(("excecao", ex))
@@ -250,7 +280,8 @@ def pesquisar(args, registro):
 
     fila = queue.Queue()
     listando = threading.Event()  # setado enquanto o produtor lista o próximo perfil
-    threading.Thread(target=listar_perfis, args=(args, registro, token, largura, fila, listando),
+    encerrar = threading.Event()  # setado quando esta rodada acaba: o produtor não continua sozinho
+    threading.Thread(target=listar_perfis, args=(args, registro, token, largura, fila, listando, encerrar),
                      daemon=True).start()
 
     done, empty, errors, known = [], [], [], 0
@@ -267,14 +298,16 @@ def pesquisar(args, registro):
             if tipo == "fim":
                 break
             if tipo == "excecao":
-                if isinstance(evento[1], ErroAutenticacao):
-                    sys.exit(f"\nErro de autenticação na pesquisa: {evento[1]}")
-                raise evento[1]
+                raise evento[1]  # ErroAutenticacao, Bloqueado etc.: quem trata é o main
             if tipo == "conhecido":
                 known += 1
             elif tipo == "erro":
-                print(f"\n  {evento[1]} pulado: erro ao listar ({evento[2]})", file=sys.stderr)
-                errors.append(evento[1])
+                _, username, site_id, ex = evento
+                print(f"\n  {username} pulado: erro ao listar ({ex})", file=sys.stderr)
+                log_erros.registrar(f"{titulo_erro_perfil(ex, 'erro ao listar as mídias')}: {username}", ex=ex,
+                                    pesquisa=args.termo, perfil=username, site_id=site_id,
+                                    acao="perfil pulado (não entrou no registro); a pesquisa seguiu para o próximo")
+                errors.append(username)
             elif tipo == "vazio":
                 _, username, site_id = evento
                 print(f"\n  {username} pulado: perfil sem mídia", file=sys.stderr)
@@ -287,11 +320,14 @@ def pesquisar(args, registro):
                 for aviso in avisos:
                     print(aviso, file=sys.stderr)
                 ok, skipped, failed = download_all(entries, destino.pasta(username), args.links_only,
-                                                   ceder_vez=listando.is_set)
+                                                   ceder_vez=listando.is_set,
+                                                   contexto={"pesquisa": args.termo, "perfil": username,
+                                                             "site_id": site_id})
                 if not args.links_only and not failed:
                     registro.registrar(site_id, username, "baixado", len(entries))
                 done.append((username, len(entries), ok, skipped, failed))
     finally:
+        encerrar.set()
         print(f"\n===== Resumo ({destino.atual}) =====", file=sys.stderr)
         for username, total, ok, skipped, failed in done:
             print(f"  {username:<30} {total:>5} mídias  ok={ok} pulados={skipped} falhas={failed}", file=sys.stderr)

@@ -54,6 +54,7 @@
             border: 1px solid var(--borda); background: var(--card); }
   .pilula.rodando { color: var(--acento); border-color: var(--acento); }
   .pilula.ok { color: var(--ok); border-color: var(--ok); }
+  .pilula.aviso { color: var(--aviso); border-color: var(--aviso); }
   .pilula.erro { color: var(--erro); border-color: var(--erro); }
   .caminho { font: 13px Consolas, monospace; word-break: break-all; }
   .numeros { display: flex; gap: 20px; margin-top: 12px; font-size: 13px; color: var(--mute); flex-wrap: wrap; }
@@ -171,6 +172,7 @@
         <h2 style="margin: 0;">Andamento</h2>
         <div class="linha">
           <label class="check" style="margin: 0;"><input type="checkbox" id="rolar" checked> Rolar automaticamente</label>
+          <button id="btnLog" title="Erros que não pararam a execução, com todos os detalhes">Abrir log de erros</button>
           <button id="btnLimpar">Limpar tela</button>
         </div>
       </div>
@@ -239,6 +241,7 @@ $("btnEscolher").onclick = () => acao(async () => {
   atualizar();
 });
 $("btnAbrir").onclick = () => acao(() => post("/api/abrir-pasta"));
+$("btnLog").onclick = () => acao(() => post("/api/abrir-log"));
 
 // ---------- listas
 async function carregarListas() {
@@ -300,6 +303,7 @@ function anexar(dados) {
 $("btnLimpar").onclick = () => { log.textContent = ""; linhaAtual = null; };
 
 // ---------- estado
+function qtdErros(n) { return n === 1 ? "1 item com erro" : `${n} itens com erro`; }
 function mostrarEstado(e) {
   rodando = e.rodando;
   const st = $("status");
@@ -307,15 +311,20 @@ function mostrarEstado(e) {
     const item = e.item && e.item.n > 1 ? ` — item ${e.item.i}/${e.item.n}` : "";
     const rodada = e.repetir ? ` — rodada ${e.rodada}` : "";
     const fase = e.parando ? "Parando" : e.espera !== null ? `Próxima rodada em ${e.espera} s` : "Baixando";
-    st.textContent = fase + rodada + item + ` · ${e.decorrido}`;
+    st.textContent = fase + rodada + item + (e.erros ? ` · ${qtdErros(e.erros)}` : "") + ` · ${e.decorrido}`;
     st.className = "pilula rodando";
   } else if (e.codigo === null || e.codigo === undefined) {
     st.textContent = "Pronto"; st.className = "pilula";
+  } else if (e.codigo === 3 || e.codigo === 130) {
+    st.textContent = (e.codigo === 3 ? "Bloqueado pelo site" : "Parado") + (e.erros ? ` · ${qtdErros(e.erros)} (ver log)` : "");
+    st.className = "pilula " + (e.codigo === 3 ? "erro" : "");
+  } else if (e.erros) {
+    st.textContent = `Terminou · ${qtdErros(e.erros)} (ver log de erros) · ${e.decorrido}`;
+    st.className = "pilula aviso";
   } else if (e.codigo === 0) {
     st.textContent = `Concluído · ${e.decorrido}`; st.className = "pilula ok";
   } else {
-    const txt = { 3: "Bloqueado pelo site", 130: "Parado", 1: "Terminou com erro" }[e.codigo] || `Terminou (código ${e.codigo})`;
-    st.textContent = txt; st.className = "pilula " + (e.codigo === 130 ? "" : "erro");
+    st.textContent = `Terminou (código ${e.codigo})`; st.className = "pilula erro";
   }
   $("pastaAtual").textContent = e.pasta ? e.pasta : `(nenhuma definida — usando ${e.pasta_efetiva})`;
   $("registro").textContent = e.registro.toLocaleString("pt-BR");

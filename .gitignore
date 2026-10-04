@@ -1,3 +1,5 @@
 __pycache__/
 # token da sua sessão no vsco.co: é pessoal, não publique
 vsco_sessao.txt
+# log de erros gerado pelos scripts/painel (ver log_erros.py)
+erros.log
