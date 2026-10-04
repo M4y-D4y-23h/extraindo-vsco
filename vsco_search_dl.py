@@ -31,6 +31,8 @@ Registro de perfis (perfis_acessados.txt, ver registro_perfis.py):
     uma requisição de teste. Se ela for recusada também, tudo para (código de saída 3); o perfil em
     andamento não entra no registro e é retomado na próxima execução.
   - As fotos vêm com ~300 px de largura (LARGURA_MINIMA); use --original para o arquivo cheio.
+  - Limite de espaço em disco (--espaco-minimo, padrão 2 GB; ver espaco_disco.py): quando o disco da
+    pasta de destino chega ao limite, tudo para (código de saída 4), inclusive a repetição.
 
 Uso:
   python vsco_search_dl.py isa                    # 10 perfis com mídia -> ./busca_isa/<username>/
@@ -40,9 +42,10 @@ Uso:
   python vsco_search_dl.py isa --uma-vez          # roda uma vez só, sem repetir
 
 Repetição: ao terminar uma rodada, espera --intervalo segundos (padrão 10) e roda de novo,
-  indefinidamente. Só o bloqueio (código 3) e o Ctrl+C encerram. Os outros erros (perfil apagado ou
-  com erro ao listar, foto que falhou, erro de autenticação, exceção) vão para erros.log com todos
-  os detalhes (ver log_erros.py): o perfil com erro é pulado e a pesquisa segue para o próximo.
+  indefinidamente. Só o bloqueio (código 3), o disco no limite (código 4) e o Ctrl+C encerram. Os
+  outros erros (perfil apagado ou com erro ao listar, foto que falhou, erro de autenticação, exceção)
+  vão para erros.log com todos os detalhes (ver log_erros.py): o perfil com erro é pulado e a
+  pesquisa segue para o próximo.
   Com --uma-vez, uma rodada com erro sai com código 1.
 
 Pasta de destino: sem -o (ou com -o relativo) tudo vai para dentro da pasta definida com
@@ -60,6 +63,7 @@ import time
 import traceback
 import urllib.parse
 
+import espaco_disco
 import log_erros
 from pasta_destino import Destino
 from registro_perfis import ARQUIVO_PADRAO, RegistroPerfis
@@ -175,6 +179,7 @@ def main():
     ap.add_argument("-o", "--out", help="pasta base (padrão: <pasta de pasta_destino.py>/busca_<termo>; "
                                         "relativa = dentro da pasta padrão)")
     add_rede_args(ap)
+    espaco_disco.add_args(ap)
     ap.add_argument("--links-only", action="store_true", help="só gera links.txt de cada perfil, sem baixar")
     ap.add_argument("--original", action="store_true", help="baixa a resolução original (padrão: ~300 px)")
     ap.add_argument("--forcar", action="store_true", help="não pula perfis que já estão no registro")
@@ -188,6 +193,7 @@ def main():
     if args.intervalo < 0:
         ap.error("--intervalo precisa ser >= 0")
     aplicar_rede_args(args)
+    espaco_disco.aplicar_args(args)
     with RegistroPerfis(args.registro) as registro:
         print(f"Registro: {len(registro)} perfis já acessados em {args.registro}", file=sys.stderr)
         if RITMO.rps:
@@ -199,8 +205,8 @@ def main():
             acao = "rodada encerrada" + ("" if args.uma_vez else f"; nova rodada em {args.intervalo:g} s")
             try:
                 ok = pesquisar(args, registro)
-            except Bloqueado:
-                raise  # código 3: para tudo
+            except (Bloqueado, espaco_disco.SemEspaco):
+                raise  # código 3 / 4: para tudo, inclusive a repetição
             except ErroAutenticacao as ex:
                 print(f"\nErro de autenticação na pesquisa: {ex}", file=sys.stderr)
                 log_erros.registrar(f'erro de autenticação na pesquisa "{args.termo}"', ex=ex,
@@ -275,6 +281,8 @@ def pesquisar(args, registro):
     # relida antes de cada perfil: pasta_destino.py pode trocar a pasta durante a execução
     destino = Destino(args.out or f"busca_{args.termo}")
     print(f"Destino: {destino.pasta()}", file=sys.stderr)
+    print(f"Disco: {espaco_disco.resumo(destino.atual)}", file=sys.stderr)
+    espaco_disco.checar(destino.atual)  # já abaixo do limite: a rodada nem começa
     # Qualquer galeria pública serve para obter o cookie vs_app_id e o token anônimo.
     _, token = load_profile("vsco")
 

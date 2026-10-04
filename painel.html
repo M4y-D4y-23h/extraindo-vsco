@@ -59,6 +59,8 @@
   .caminho { font: 13px Consolas, monospace; word-break: break-all; }
   .numeros { display: flex; gap: 20px; margin-top: 12px; font-size: 13px; color: var(--mute); flex-wrap: wrap; }
   .numeros b { color: var(--txt); font-size: 15px; }
+  .numeros b.baixo { color: var(--erro); }
+  .check input[type=number] { width: 72px; padding: 2px 6px; margin: 0 2px; }
   #log { background: var(--log-bg); color: var(--log-txt); border-radius: 8px; padding: 12px;
          height: 440px; overflow: auto; margin: 0; font: 12.5px/1.45 Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
   #log .t { color: #8fb4ff; font-weight: 700; }
@@ -94,6 +96,7 @@
       <p class="dica">Pode trocar a qualquer momento, inclusive durante um download: vale a partir do próximo perfil.</p>
       <div class="numeros">
         <span>Perfis no registro<br><b id="registro">–</b></span>
+        <span>Espaço livre <span id="disco"></span><br><b id="espaco">–</b></span>
       </div>
     </section>
 
@@ -157,6 +160,11 @@
         <label class="check"><input type="checkbox" id="original"> Resolução original (bem maior que ~300 px)</label>
         <label class="check"><input type="checkbox" id="forcar"> Baixar de novo perfis que já estão no registro</label>
         <label class="check"><input type="checkbox" id="links"> Só gerar links.txt, sem baixar</label>
+        <label class="check"><input type="checkbox" id="limiteEspaco" checked>
+          <span>Parar quando o disco de destino ficar com menos de
+            <input type="number" id="espacoMinimo" min="0.1" step="0.5" value="2"> GB livres</span></label>
+        <p class="dica">Limite de segurança: vale para o disco onde a pasta está (C:, outro HD, pendrive…).
+          Ao chegar nele tudo para, o arquivo pela metade é apagado e o perfil é retomado na próxima vez.</p>
       </details>
 
       <div class="acoes">
@@ -184,7 +192,8 @@
 <script>
 const TOKEN = "__TOKEN__";
 const $ = (id) => document.getElementById(id);
-const CAMPOS = ["alvoPerfil", "alvoPesquisa", "lista", "como", "inicio", "n", "rps", "pausa", "subpasta", "original", "forcar", "links"];
+const CAMPOS = ["alvoPerfil", "alvoPesquisa", "lista", "como", "inicio", "n", "rps", "pausa", "subpasta", "original", "forcar", "links",
+                "limiteEspaco", "espacoMinimo"];
 let modo = "pesquisa", pos = 0, rodando = false;
 
 // ---------- memória do formulário (só conveniência; funciona sem)
@@ -259,6 +268,30 @@ function contarLista() { const n = itensLista().length; $("contaLista").textCont
 $("lista").oninput = contarLista;
 $("como").onchange = mostrarModo;
 
+// ---------- limite de espaço em disco
+const GB = 1024 ** 3;
+let ultimoDisco = null;
+function limiteBytes() {
+  const gb = parseFloat(String($("espacoMinimo").value).replace(",", "."));
+  return $("limiteEspaco").checked && gb > 0 ? gb * GB : 0;
+}
+function textoGB(n) {  // arredonda para baixo, como o painel.py: 1,999 GB livres não aparece como 2 GB
+  const casas = n < 100 * GB ? 2 : 1, f = 10 ** casas;
+  return (Math.floor(n / GB * f) / f).toLocaleString("pt-BR", { maximumFractionDigits: casas }) + " GB";
+}
+function mostrarDisco(d) {
+  ultimoDisco = d;
+  $("espacoMinimo").disabled = !$("limiteEspaco").checked;
+  if (!d) { $("disco").textContent = ""; $("espaco").textContent = "disco inacessível"; $("espaco").className = "baixo"; return; }
+  const limite = limiteBytes(), baixo = limite && d.livre < limite;
+  $("disco").textContent = `(${d.local})`;
+  $("espaco").textContent = `${textoGB(d.livre)} de ${textoGB(d.total)}` + (baixo ? " — abaixo do limite" : "");
+  $("espaco").className = baixo ? "baixo" : "";
+  $("espaco").title = limite ? `Os downloads param quando restarem ${textoGB(limite)} livres` : "Limite de espaço desligado";
+}
+$("limiteEspaco").addEventListener("change", () => mostrarDisco(ultimoDisco));
+$("espacoMinimo").addEventListener("input", () => mostrarDisco(ultimoDisco));
+
 // ---------- iniciar / parar
 $("btnIniciar").onclick = () => acao(async () => {
   const cfg = { modo };
@@ -315,9 +348,10 @@ function mostrarEstado(e) {
     st.className = "pilula rodando";
   } else if (e.codigo === null || e.codigo === undefined) {
     st.textContent = "Pronto"; st.className = "pilula";
-  } else if (e.codigo === 3 || e.codigo === 130) {
-    st.textContent = (e.codigo === 3 ? "Bloqueado pelo site" : "Parado") + (e.erros ? ` · ${qtdErros(e.erros)} (ver log)` : "");
-    st.className = "pilula " + (e.codigo === 3 ? "erro" : "");
+  } else if (e.codigo === 3 || e.codigo === 4 || e.codigo === 130) {
+    const parou = { 3: "Bloqueado pelo site", 4: "Parado: disco no limite de espaço", 130: "Parado" }[e.codigo];
+    st.textContent = parou + (e.erros ? ` · ${qtdErros(e.erros)} (ver log)` : "");
+    st.className = "pilula " + (e.codigo === 130 ? "" : "erro");
   } else if (e.erros) {
     st.textContent = `Terminou · ${qtdErros(e.erros)} (ver log de erros) · ${e.decorrido}`;
     st.className = "pilula aviso";
@@ -328,6 +362,7 @@ function mostrarEstado(e) {
   }
   $("pastaAtual").textContent = e.pasta ? e.pasta : `(nenhuma definida — usando ${e.pasta_efetiva})`;
   $("registro").textContent = e.registro.toLocaleString("pt-BR");
+  mostrarDisco(e.disco);
   $("btnIniciar").disabled = e.rodando;
   $("btnParar").disabled = !e.rodando;
   $("btnPararDepois").hidden = !(e.rodando && (e.repetir || (e.item && e.item.n > 1)));

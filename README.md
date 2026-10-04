@@ -17,7 +17,10 @@ Principais características:
   o arquivo é relido antes de cada perfil, então dá para mudar a pasta com o script rodando.
 - **Erros não param a fila** (`erros.log`): perfil apagado/inexistente, foto que falhou etc. são
   gravados com todos os detalhes no log de erros e a execução segue para o próximo. Só o bloqueio do
-  Cloudflare (código 3) para tudo.
+  Cloudflare (código 3) e o disco no limite de espaço (código 4) param tudo.
+- **Limite de segurança de espaço em disco** (`--espaco-minimo`, padrão 2 GB; liga/desliga nas *Opções
+  avançadas* do painel): os downloads param antes de o disco de destino (C:, outro HD, pendrive, cartão)
+  ficar sem espaço. Ver *Limite de espaço em disco*.
 
 ---
 
@@ -78,6 +81,7 @@ Para só instalar/atualizar, sem abrir o painel: `python dependencias.py`.
 | `dependencias.py` | Instala/atualiza as dependências (rodado pelo `Painel.bat`). Tem a lista dos programas externos. |
 | `requirements.txt` | Bibliotecas Python do projeto, instaladas/atualizadas pelo `pip` (hoje nenhuma). |
 | `pasta_destino.py` | Mostra/define a pasta padrão onde os downloads são salvos (`pasta_destino.txt`). |
+| `espaco_disco.py` | Limite de segurança de espaço em disco (`--espaco-minimo`): confere o espaço livre do disco de destino e para tudo antes de ele encher. |
 | `pasta_destino.txt` | Criado por `pasta_destino.py`. Uma linha com a pasta base (pode ser editado no Bloco de Notas). |
 | `perfis_acessados.txt` | Criado automaticamente na primeira execução. Histórico de perfis já processados. |
 | `vsco_sessao.txt` | Opcional, criado por você. Token da sua sessão logada, usado só na pesquisa (ver *Erro de autenticação na pesquisa*).
@@ -93,23 +97,26 @@ as dependências (ver *Requisitos*); o `python painel.py` abre direto. O navegad
 `http://127.0.0.1:8765` com tudo numa tela só:
 
 - **Onde salvar**: mostra/troca a pasta padrão (digitando ou pelo botão *Escolher pasta…*) e abre a
-  pasta no Explorer. Trocar durante um download vale a partir do próximo perfil.
+  pasta no Explorer. Trocar durante um download vale a partir do próximo perfil. Mostra também o
+  **espaço livre** do disco dessa pasta (em vermelho quando está abaixo do limite de segurança).
 - **O que baixar**: abas *Um perfil*, *Pesquisa* e *Lista* (carrega um `.txt` da pasta do projeto, como
   `variacoes_isabela.txt`, e roda um item por vez; dá para começar de um item específico).
-  As *Opções avançadas* têm ritmo, pausa no bloqueio, subpasta, resolução original, `--forcar` e só links.
+  As *Opções avançadas* têm ritmo, pausa no bloqueio, subpasta, resolução original, `--forcar`, só links
+  e o **limite de espaço em disco** (marcado por padrão, com o campo de GB ao lado).
 - **Iniciar / Parar agora / Parar após o item atual**, e o **andamento ao vivo** com a mesma saída dos scripts.
 
 Detalhes:
 
 - Deixe a janela preta do `Painel.bat` aberta; fechar ela encerra o painel (e o download em andamento).
 - Só roda uma execução por vez: duas ao mesmo tempo dobrariam o ritmo de requisições.
-- Numa lista, um bloqueio confirmado (código 3) interrompe a lista inteira e o painel diz de qual item retomar.
+- Numa lista, um bloqueio confirmado (código 3) ou o disco no limite de espaço (código 4) interrompe a
+  lista inteira e o painel diz de qual item retomar.
 - Qualquer outro erro (código 1 etc.) **não para nada**: o painel mostra
   `*** <item>: terminou com erro (código 1), registrado em erros.log; o painel seguiu para o próximo item.`,
   conta o item como erro e segue para o próximo da fila. O botão **Abrir log de erros** abre o `erros.log`.
 - *Pesquisa* e *Lista* de pesquisas se repetem sozinhas: ao terminar a rodada, o painel espera 10 s e roda
-  tudo de novo, indefinidamente. Só o bloqueio (código 3) encerra a repetição. Para parar antes:
-  *Parar agora* ou *Parar após a rodada atual* / *Parar após o item atual*.
+  tudo de novo, indefinidamente. Só o bloqueio (código 3) e o disco no limite (código 4) encerram a
+  repetição. Para parar antes: *Parar agora* ou *Parar após a rodada atual* / *Parar após o item atual*.
 - O painel só aceita conexões do próprio computador. Se a porta 8765 estiver ocupada, ele usa a seguinte.
 
 Os comandos abaixo continuam funcionando do mesmo jeito para quem preferir o terminal.
@@ -138,6 +145,48 @@ nova não puder ser criada (disco desconectado, caminho inválido), o script avi
 > Se um perfil foi interrompido pela metade (Ctrl+C, bloqueio) e você trocar a pasta antes de retomá-lo,
 > ele recomeça do zero na pasta nova: a retomada só enxerga os arquivos da pasta atual.
 
+### Limite de espaço em disco
+
+Para os downloads nunca encherem o disco, o espaço livre do disco **onde a pasta de destino está** é
+vigiado o tempo todo. Vale para qualquer disco: o do Windows (C:), outro HD, um pendrive, um cartão de
+memória ou uma pasta de rede. Se a pasta de destino for trocada durante a execução, o disco vigiado
+passa a ser o da pasta nova.
+
+- **Painel**: em *Opções avançadas*, a opção *Parar quando o disco de destino ficar com menos de __ GB
+  livres* (marcada por padrão, com 2 GB). Desmarque para desligar ou mude o número. Se o disco já estiver
+  abaixo do limite, o *Iniciar* recusa e diz quanto espaço resta.
+- **Terminal**: `--espaco-minimo GB` nos dois scripts (padrão 2; aceita `1,5`; `0` desliga).
+
+```powershell
+python vsco_dl.py isahevangelista --espaco-minimo 5     # para quando o disco tiver só 5 GB livres
+python vsco_search_dl.py isabela --espaco-minimo 0      # sem limite (não recomendado)
+```
+
+Quando o espaço é conferido:
+
+1. no início da execução e de cada rodada da pesquisa: abaixo do limite, nada começa (nem as requisições);
+2. antes de cada perfil e de cada lote de fotos;
+3. **durante** o download, várias vezes por segundo (no `curl` e no `ffmpeg` dos vídeos HLS).
+
+Ao chegar no limite, **tudo para** com o código de saída **4**: o `curl`/`ffmpeg` é encerrado na hora, o
+arquivo que estava pela metade é apagado (os que já terminaram ficam) e o perfil em andamento **não**
+entra no registro. Na próxima execução, as fotos que já estão na pasta são puladas e só o resto é
+baixado. No painel, o código 4 interrompe a lista e a repetição (continuar só encheria o mesmo disco):
+
+```
+*** ESPAÇO EM DISCO no limite de segurança: restam 1,99 GB livres em F:\ (de 14,91 GB), abaixo do limite de segurança de 2 GB.
+    Nada mais é baixado, para o disco não encher (um arquivo que estivesse pela metade foi
+    apagado). O perfil em andamento NÃO foi registrado: na próxima execução os arquivos já
+    baixados são pulados e o resto é retomado.
+    Para continuar: libere espaço, troque a pasta de destino (no painel ou com
+    python pasta_destino.py) ou diminua o limite (--espaco-minimo; 0 desliga) e rode de novo.
+```
+
+Cada execução mostra no começo quanto espaço há, ex.: `Disco: 123,45 GB livres em F:\ de 465,75 GB (para em 2 GB)`.
+GB aqui é 1024³ bytes, a mesma conta do Explorer. O limite é a folga que **nunca** é usada: no disco do
+Windows, deixe uma folga maior (ex.: 10 GB), porque o sistema também precisa de espaço para atualizações
+e arquivos temporários.
+
 ### Um perfil
 
 ```powershell
@@ -161,8 +210,8 @@ python vsco_search_dl.py isabela --uma-vez            # roda uma vez só, sem re
 ```
 
 **Repetição automática**: ao terminar uma rodada, o script espera `--intervalo` segundos (padrão 10)
-e roda a pesquisa de novo, com os mesmos valores, indefinidamente. Só o bloqueio (código 3) e o
-`Ctrl+C` encerram. Os outros erros (perfil apagado ou com erro ao listar, foto que falhou, erro de
+e roda a pesquisa de novo, com os mesmos valores, indefinidamente. Só o bloqueio (código 3), o disco
+no limite de espaço (código 4) e o `Ctrl+C` encerram. Os outros erros (perfil apagado ou com erro ao listar, foto que falhou, erro de
 autenticação, qualquer exceção) vão para o `erros.log`: o perfil com erro é pulado, a pesquisa segue
 para o próximo e a repetição continua. Com `--uma-vez`, uma rodada com erro sai com código 1.
 
@@ -199,21 +248,22 @@ O painel e os laços `foreach` passam a usar o arquivo automaticamente. Cuidados
 
 Cada linha de `variacoes_isabela.txt` pode ser usada como termo de pesquisa ou como username direto.
 Graças ao registro, perfis que aparecem em mais de uma pesquisa só são baixados uma vez.
-O `if ($LASTEXITCODE -eq 3) { break }` encerra o laço inteiro quando vier um bloqueio, em vez de
-seguir para a próxima variação e continuar batendo no site. Qualquer outro código (ex.: 1, perfil
+O `if ($LASTEXITCODE -in 3, 4) { break }` encerra o laço inteiro quando vier um bloqueio (3) ou o
+disco chegar ao limite de espaço (4), em vez de seguir para a próxima variação e continuar batendo no
+site (ou enchendo o disco). Qualquer outro código (ex.: 1, perfil
 apagado) segue para a próxima variação, e o erro fica no `erros.log`.
 
 ```powershell
 # como termo de pesquisa (5 perfis novos por variação)
 foreach ($v in Get-Content variacoes_isabela.txt) {
     python vsco_search_dl.py $v --uma-vez -n 5 -o busca_isabela
-    if ($LASTEXITCODE -eq 3) { break }
+    if ($LASTEXITCODE -in 3, 4) { break }
 }
 
 # como username exato (variações que não existem são reportadas e puladas)
 foreach ($v in Get-Content variacoes_isabela.txt) {
     python vsco_dl.py $v -o "perfis/$v"
-    if ($LASTEXITCODE -eq 3) { break }
+    if ($LASTEXITCODE -in 3, 4) { break }
 }
 ```
 
@@ -224,6 +274,7 @@ foreach ($v in Get-Content variacoes_isabela.txt) {
 | `-o, --out` | ambos | Pasta de saída (padrão: `<pasta padrão>/<username>` ou `<pasta padrão>/busca_<termo>`; relativa fica dentro da pasta padrão) |
 | `--rps N` | ambos | Limite global de requisições por segundo (padrão 1.5; aceita `1,5`; `0` = sem limite) |
 | `--pausa-bloqueio MIN` | ambos | Minutos de pausa antes da requisição de teste quando vier bloqueio (padrão 5; `0` = para no primeiro bloqueio) |
+| `--espaco-minimo GB` | ambos | Para tudo (código 4) quando o disco da pasta de destino ficar com menos de GB livres (padrão 2; aceita `1,5`; `0` = desliga). Ver *Limite de espaço em disco* |
 | `-n, --perfis` | busca | Quantos perfis **novos com mídia** baixar (padrão 10) |
 | `--original` | ambos | Baixa a resolução original em vez de ~300 px |
 | `--forcar` | ambos | Não pula perfis que já estão no registro |
@@ -239,7 +290,8 @@ foreach ($v in Get-Content variacoes_isabela.txt) {
 |---|---|
 | 0 | Terminou sem erro (inclui perfil já no registro, que só é pulado) |
 | 1 | Erro, gravado no `erros.log`: perfil apagado ou inexistente (HTTP 404), erro ao listar, mídia que falhou, curl ausente, pesquisa exigindo login, exceção inesperada etc. **Não para** o painel, a repetição nem os laços `foreach`: a execução segue para o próximo |
-| 3 | **Bloqueado pelo Cloudflare** (confirmado pela requisição de teste): tudo foi interrompido; rode de novo mais tarde. É o único código que para a fila |
+| 3 | **Bloqueado pelo Cloudflare** (confirmado pela requisição de teste): tudo foi interrompido; rode de novo mais tarde. Para a fila |
+| 4 | **Disco no limite de espaço** (`--espaco-minimo`): tudo foi interrompido antes de o disco encher; libere espaço ou troque a pasta e rode de novo. Para a fila |
 
 ### Log de erros (`erros.log`)
 
@@ -270,8 +322,9 @@ Exemplo, um perfil que foi apagado:
     comando:         vsco_dl.py --rps 1.5 --pausa-bloqueio 5 -- vdvdvdvdvdvdgdgg
 ```
 
-O bloqueio do Cloudflare (código 3) não entra no log: ele para tudo e a mensagem fica na tela. O
-arquivo só cresce; pode ser apagado a qualquer momento (é recriado no próximo erro).
+O bloqueio do Cloudflare (código 3) e o disco no limite de espaço (código 4) não entram no log: eles
+param tudo e a mensagem fica na tela. O arquivo só cresce; pode ser apagado a qualquer momento (é
+recriado no próximo erro).
 
 ---
 
@@ -392,6 +445,8 @@ Medido em fotos reais:
 
 Num perfil real de teste, 98 fotos ocuparam 2,39 MB (média de 24,9 KB). Vídeos não são
 redimensionados e são baixados como vêm da API, então perfis com muitos vídeos ocupam bem mais.
+Seja qual for o tamanho, o limite de segurança (`--espaco-minimo`, ver *Limite de espaço em disco*)
+para tudo antes de o disco encher.
 A memória RAM praticamente não muda com o tamanho da foto: o `curl` grava cada arquivo direto no disco.
 
 ### 3. Registro de perfis (`perfis_acessados.txt`)

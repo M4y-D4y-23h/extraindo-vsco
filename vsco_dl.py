@@ -17,7 +17,10 @@ Como o site funciona (e por que não precisamos rolar a página):
      estão lá são pulados nas próximas execuções.
   5. Erros (perfil apagado/inexistente, HTTP 404, fotos que falharam, exceções) vão para erros.log
      com todos os detalhes (ver log_erros.py) e saem com código 1; o painel e os laços seguem para o
-     próximo da fila. Só o bloqueio (código 3) para tudo.
+     próximo da fila. Só o bloqueio (código 3) e o disco cheio (código 4) param tudo.
+  6. Limite de espaço em disco (--espaco-minimo, padrão 2 GB; ver espaco_disco.py): o espaço livre
+     do disco da pasta de destino é conferido antes e durante os downloads; abaixo do limite, o curl
+     é encerrado, o arquivo pela metade é apagado e o script sai com código 4.
 
 Cuidados com o firewall (Cloudflare) do VSCO:
   - Ritmo global (--rps): TODAS as requisições (página, API, fotos), de todas as threads, passam por
@@ -36,6 +39,7 @@ Uso:
   python vsco_dl.py isahevangelista --links-only     # só gera links.txt (p/ wget -i links.txt)
   python vsco_dl.py isahevangelista --original       # resolução original em vez da menor
   python vsco_dl.py isahevangelista --forcar         # baixa mesmo se já estiver no registro
+  python vsco_dl.py isahevangelista --espaco-minimo 5   # para quando o disco tiver só 5 GB livres
 
 Pasta de destino: sem -o (ou com -o relativo) os arquivos vão para dentro da pasta definida com
   python pasta_destino.py "D:\\Fotos VSCO"   (ver pasta_destino.py)
@@ -56,6 +60,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 import dependencias
+import espaco_disco
 import log_erros
 from pasta_destino import Destino
 from registro_perfis import ARQUIVO_PADRAO, RegistroPerfis
@@ -67,6 +72,7 @@ PAGE_SIZE = 14  # o mesmo valor que o site usa; valores maiores levam 403 do Clo
 LARGURA_MINIMA = 300  # largura mínima pedida ao CDN; ele arredonda para a faixa dele (às vezes um pouco maior)
 RPS_PADRAO = 1.5
 SAIDA_BLOQUEIO = 3  # código de saída quando o Cloudflare bloqueia (p/ parar laços em PowerShell/bash)
+SAIDA_SEM_ESPACO = espaco_disco.SAIDA_SEM_ESPACO  # 4: o disco de destino chegou ao limite de segurança
 
 # O Cloudflare do vsco.co bloqueia o fingerprint TLS do Python (urllib/requests -> 403),
 # mas aceita o curl. Por isso todas as requisições passam pelo curl.
@@ -467,7 +473,8 @@ def _checar_curl():
 def _baixar_fatia(fatia, outdir, progresso, motivos):
     """Baixa `fatia` [(entry, path)] com UM processo curl: em série, na mesma conexão, no ritmo do
     RITMO (vagas já reservadas por quem chama). O resultado de cada arquivo é lido ao vivo, então um
-    bloqueio (aqui ou em outra thread) mata o curl na hora.
+    bloqueio (aqui ou em outra thread) mata o curl na hora. O espaço livre do disco também é conferido
+    a cada volta: abaixo do limite (espaco_disco), o curl é encerrado e sai SemEspaco.
 
     Devolve (retentar, repetir): `retentar` são falhas transitórias, para outra rodada com espera
     (o motivo de cada uma fica em `motivos[path]`, para o log de erros); `repetir` são os itens
@@ -525,6 +532,9 @@ def _baixar_fatia(fatia, outdir, progresso, motivos):
                             break
                 if interrompido or terminou:
                     break
+                # disco no limite: SemEspaco; o finally encerra o curl e apaga só o arquivo pela metade
+                # (os que já terminaram foram finalizados acima)
+                espaco_disco.checar(outdir)
                 _parada.wait(0.2)
                 checar_parada()  # outra thread confirmou um bloqueio
                 if pausado():  # outra thread viu um bloqueio: encerra o curl e espera a pausa lá fora
@@ -550,13 +560,32 @@ def _baixar_fatia(fatia, outdir, progresso, motivos):
     return retentar + list(por_nome.values()), []  # sem linha de status = curl morreu antes: tenta de novo
 
 
+def _rodar_ffmpeg(cmd, tmp, outdir):
+    """Roda o ffmpeg conferindo o espaço livre a cada segundo. Se o disco chegar ao limite (ou vier
+    Ctrl+C), o ffmpeg é encerrado e o arquivo pela metade é apagado. Devolve o código de saída."""
+    proc = subprocess.Popen(cmd)
+    try:
+        while True:
+            try:
+                return proc.wait(1)
+            except subprocess.TimeoutExpired:
+                espaco_disco.checar(outdir)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+
 def download_all(entries, outdir, links_only=False, ceder_vez=None, contexto=None):
     """Grava links.txt e baixa tudo no ritmo global. Retorna (ok, pulados, falhas).
 
     ceder_vez: função opcional; enquanto devolver True, o lote é dividido em fatias de PAGE_SIZE
     fotos para que outra thread (ex.: a listagem do próximo perfil) consiga vagas no RITMO entre
     uma fatia e outra. Sem ela, o perfil inteiro sai de um único processo curl.
-    contexto: campos para o log de erros (perfil, site_id...), onde vão as mídias que falharam."""
+    contexto: campos para o log de erros (perfil, site_id...), onde vão as mídias que falharam.
+    Levanta espaco_disco.SemEspaco se o disco de `outdir` chegar ao limite de segurança."""
     os.makedirs(outdir, exist_ok=True)
     links_path = os.path.join(outdir, "links.txt")
     with open(links_path, "w", encoding="utf-8") as f:
@@ -601,6 +630,7 @@ def download_all(entries, outdir, links_only=False, ceder_vez=None, contexto=Non
         while pendentes:
             n = PAGE_SIZE if ceder_vez and ceder_vez() else len(pendentes)
             fatia, pendentes = pendentes[:n], pendentes[n:]
+            espaco_disco.checar(outdir)
             RITMO.reservar(len(fatia))  # durante uma pausa de bloqueio, espera aqui
             retentar, repetir = _baixar_fatia(fatia, outdir, progresso, motivos)
             diretos += retentar
@@ -612,14 +642,16 @@ def download_all(entries, outdir, links_only=False, ceder_vez=None, contexto=Non
         if not shutil.which("ffmpeg"):
             progresso("erro (vídeo HLS precisa de ffmpeg)", entry[1])
             continue
+        espaco_disco.checar(outdir)
         RITMO.reservar()
         tmp = path + ".part.mp4"
-        r = subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", entry[1], "-c", "copy", tmp])
-        if r.returncode == 0:
+        codigo = _rodar_ffmpeg(["ffmpeg", "-loglevel", "error", "-y", "-i", entry[1], "-c", "copy", tmp],
+                               tmp, outdir)
+        if codigo == 0:
             _finalizar(entry, tmp, path)
             progresso("ok")
         else:
-            progresso(f"erro (ffmpeg {r.returncode})", entry[1])
+            progresso(f"erro (ffmpeg {codigo})", entry[1])
     if alvos:
         print(file=sys.stderr)
     if falhas:
@@ -661,16 +693,20 @@ def main():
     ap.add_argument("-o", "--out", help="pasta de saída (padrão: <pasta de pasta_destino.py>/<username>; "
                                         "relativa = dentro da pasta padrão)")
     add_rede_args(ap)
+    espaco_disco.add_args(ap)
     ap.add_argument("--links-only", action="store_true", help="só grava links.txt, sem baixar")
     ap.add_argument("--original", action="store_true", help="baixa a resolução original (padrão: ~300 px)")
     ap.add_argument("--forcar", action="store_true", help="baixa mesmo que o perfil já esteja no registro")
     ap.add_argument("--registro", default=ARQUIVO_PADRAO, help="arquivo de perfis acessados (padrão: %(default)s)")
     args = ap.parse_args()
     aplicar_rede_args(args)
+    espaco_disco.aplicar_args(args)
 
     m = re.search(r"vsco\.co/([^/?#]+)", args.perfil)
     username = m.group(1) if m else args.perfil.strip("/")
     outdir = Destino(args.out or username).pasta()
+    _log(f"Disco: {espaco_disco.resumo(outdir)}")
+    espaco_disco.checar(outdir)  # já abaixo do limite: nem abre o perfil
 
     try:
         site_id, token = load_profile(username)
@@ -705,8 +741,9 @@ def cleanup():
 
 
 def rodar(main_fn):
-    """Executa o main tratando o bloqueio (mensagem clara e código de saída SAIDA_BLOQUEIO) e os
-    erros inesperados (traceback na tela e no log de erros, código 1)."""
+    """Executa o main tratando o bloqueio (mensagem clara e código de saída SAIDA_BLOQUEIO), o disco
+    no limite de segurança (SAIDA_SEM_ESPACO) e os erros inesperados (traceback na tela e no log de
+    erros, código 1)."""
     if hasattr(signal, "SIGBREAK"):  # Ctrl+Break (é o que o painel.py envia para parar) = Ctrl+C
         signal.signal(signal.SIGBREAK, signal.default_int_handler)
     try:
@@ -714,6 +751,9 @@ def rodar(main_fn):
     except Bloqueado as ex:
         _log(mensagem_bloqueio(ex))
         sys.exit(SAIDA_BLOQUEIO)
+    except espaco_disco.SemEspaco as ex:
+        _log(espaco_disco.mensagem(ex))
+        sys.exit(SAIDA_SEM_ESPACO)
     except KeyboardInterrupt:
         _log("\nInterrompido. Rode de novo para continuar de onde parou.")
         sys.exit(130)

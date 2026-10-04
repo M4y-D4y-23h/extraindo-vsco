@@ -11,10 +11,15 @@ mesmo tempo dobrariam o ritmo de requisições), e mostra a saída deles ao vivo
     execução em andamento (a partir do próximo perfil).
   - Parar: envia Ctrl+Break ao script, que encerra como num Ctrl+C (o curl é interrompido, arquivos
     parciais são apagados e o resumo é impresso). Se não responder em 15 s, é encerrado à força.
-  - Lista: roda um item por vez; um bloqueio confirmado (código 3) interrompe a lista inteira.
-    Qualquer outro erro não para nada: o item é contado como erro e a lista segue para o próximo.
+  - Lista: roda um item por vez; um bloqueio confirmado (código 3) ou o disco no limite de espaço
+    (código 4) interrompe a lista inteira. Qualquer outro erro não para nada: o item é contado como
+    erro e a lista segue para o próximo.
   - Pesquisa (e lista de pesquisas): ao terminar a rodada, espera INTERVALO_REPETICAO segundos e roda
-    tudo de novo, indefinidamente. Só o bloqueio (código 3) encerra a repetição.
+    tudo de novo, indefinidamente. Só o bloqueio (código 3) e o disco no limite (código 4) encerram
+    a repetição.
+  - Espaço em disco (opções avançadas, ligado por padrão): os scripts param quando o disco da pasta de
+    destino fica com menos GB livres que o limite (ver espaco_disco.py). Já abaixo do limite, o
+    Iniciar recusa e diz o porquê. O espaço livre aparece no card "Onde salvar".
   - Erros: os scripts gravam cada erro, com os detalhes, em erros.log (ver log_erros.py). Se um item
     terminar com erro sem ter gravado nada lá (ex.: o script quebrou ao iniciar), o painel grava o
     comando, o código de saída e as últimas linhas da saída.
@@ -35,6 +40,7 @@ import time
 import urllib.parse
 import webbrowser
 
+import espaco_disco
 import log_erros
 import pasta_destino
 from registro_perfis import ARQUIVO_PADRAO as REGISTRO
@@ -44,6 +50,10 @@ HTML = os.path.join(AQUI, "painel.html")
 PORTA_PADRAO = 8765
 TOKEN = secrets.token_urlsafe(16)  # exigido nos POSTs: outro site aberto no navegador não consegue comandar o painel
 SAIDA_BLOQUEIO = 3  # o mesmo de vsco_dl.SAIDA_BLOQUEIO
+SAIDA_SEM_ESPACO = espaco_disco.SAIDA_SEM_ESPACO  # 4: disco de destino no limite de segurança
+# códigos que param a lista e a repetição (qualquer outro erro só pula para o próximo item)
+PARAM_TUDO = {SAIDA_BLOQUEIO: "Bloqueio confirmado",
+              SAIDA_SEM_ESPACO: "Espaço em disco no limite de segurança"}
 SAIDA_INTERROMPIDO = 130  # Ctrl+C/Parar: não é erro
 INTERVALO_REPETICAO = 10  # segundos entre uma rodada de pesquisa e a próxima
 LINHAS_NO_LOG = 30  # linhas finais da saída que o painel grava no erros.log quando o script não gravou nada
@@ -150,10 +160,10 @@ class Tarefa:
                 self.rodada += 1
                 if self.repetir:
                     LOG.linha(f"\n##### Rodada {self.rodada} — {time.strftime('%d/%m %H:%M:%S')}")
-                bloqueado = self._rodada(comandos)
-                if bloqueado and self.repetir:
-                    LOG.linha("*** Bloqueio confirmado (código 3): repetição encerrada.")
-                if bloqueado or not self.repetir or self.parar_agora or self.parar_depois:
+                parada = self._rodada(comandos)
+                if parada and self.repetir:
+                    LOG.linha(f"*** {PARAM_TUDO[parada]} (código {parada}): repetição encerrada.")
+                if parada or not self.repetir or self.parar_agora or self.parar_depois:
                     break
                 LOG.linha(f">>> Próxima rodada em {INTERVALO_REPETICAO} s.")
                 self.item, self.proxima = None, time.time() + INTERVALO_REPETICAO
@@ -173,8 +183,9 @@ class Tarefa:
             LOG.linha(f"##### Fim — {duracao(self.fim - self.inicio)}")
 
     def _rodada(self, comandos):
-        """Roda a lista de comandos uma vez. Só o bloqueio (código 3) interrompe a lista: com qualquer
-        outro erro ela segue para o próximo item. Devolve True se houve bloqueio."""
+        """Roda a lista de comandos uma vez. Só o bloqueio (código 3) e o disco no limite (código 4)
+        interrompem a lista: com qualquer outro erro ela segue para o próximo item. Devolve o código
+        que parou tudo (3 ou 4), ou None."""
         total = len(comandos)
         for i, (nome, argv) in enumerate(comandos, 1):
             if self.parar_agora or self.parar_depois:
@@ -185,11 +196,12 @@ class Tarefa:
             LOG.linha(f"\n===== {prefixo}{nome}")
             log_antes, saida_antes = log_erros.tamanho(), LOG.posicao()
             self.codigo = self._executar(argv)
-            if self.codigo == SAIDA_BLOQUEIO:
+            if self.codigo in PARAM_TUDO:
                 if total > 1:
-                    LOG.linha("*** Bloqueio confirmado: a lista foi interrompida. "
-                              f"Para retomar, comece do item {i}.")
-                return True
+                    depois = " (depois de liberar espaço ou trocar a pasta)" if self.codigo == SAIDA_SEM_ESPACO else ""
+                    LOG.linha(f"*** {PARAM_TUDO[self.codigo]}: a lista foi interrompida. "
+                              f"Para retomar{depois}, comece do item {i}.")
+                return self.codigo
             if self.parar_agora:
                 break
             if self.codigo not in (0, SAIDA_INTERROMPIDO):
@@ -214,7 +226,7 @@ class Tarefa:
                                         })
                 LOG.linha(f"*** {nome}: terminou com erro (código {self.codigo}), registrado em "
                           f"{os.path.basename(log_erros.ARQUIVO)}; {acao}.")
-        return False
+        return None
 
     def _executar(self, argv):
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
@@ -273,6 +285,20 @@ def duracao(seg):
     return f"{h} h {m:02d} min" if h else f"{m} min {s:02d} s" if m else f"{s} s"
 
 
+def limite_espaco(cfg):
+    """GB livres que o download nunca usa (opção 'limite de espaço' do painel); 0 = desligado."""
+    if not cfg.get("limiteEspaco", True):
+        return 0
+    try:
+        gb = float(str(cfg.get("espacoMinimo", espaco_disco.PADRAO_GB)).replace(",", "."))
+    except ValueError:
+        gb = 0
+    if gb <= 0:
+        raise ValueError("Informe o limite de espaço livre em GB (maior que 0) ou desmarque a opção "
+                         "nas opções avançadas.")
+    return gb
+
+
 def montar(cfg):
     """Formulário do painel -> (título, [(nome, argv)], repetir). Pesquisas se repetem (ver Tarefa)."""
     modo = cfg.get("modo")
@@ -281,10 +307,16 @@ def montar(cfg):
     n = int(cfg.get("n") or 10)
     if rps < 0 or pausa < 0 or n < 1:
         raise ValueError("Ritmo e pausa precisam ser >= 0 e perfis >= 1.")
-    comuns = ["--rps", f"{rps:g}", "--pausa-bloqueio", f"{pausa:g}"]
+    gb = limite_espaco(cfg)
+    comuns = ["--rps", f"{rps:g}", "--pausa-bloqueio", f"{pausa:g}", "--espaco-minimo", f"{gb:g}"]
     comuns += [op for op, marcado in (("--original", cfg.get("original")), ("--forcar", cfg.get("forcar")),
                                       ("--links-only", cfg.get("links"))) if marcado]
     subpasta = (cfg.get("subpasta") or "").strip().strip('"')
+    # os scripts conferem de novo (e durante o download); aqui é para avisar já no Iniciar
+    motivo = espaco_disco.falta(os.path.join(pasta_efetiva(), subpasta), int(gb * espaco_disco.GB))
+    if motivo:
+        raise ValueError(f"Não dá para começar: {motivo}. Libere espaço, troque a pasta ou diminua/desmarque "
+                         "o limite nas opções avançadas.")
     py = [sys.executable, "-u"]
 
     def busca(termo):
@@ -364,6 +396,12 @@ def pasta_efetiva():
     return pasta_destino.ler() or AQUI
 
 
+def disco():
+    """Espaço do disco da pasta padrão, para o card 'Onde salvar' (None se inacessível)."""
+    u = espaco_disco.uso(pasta_efetiva())
+    return {"local": u[0], "livre": u[1], "total": u[2]} if u else None
+
+
 def estado(desde):
     t = TAREFA
     return {
@@ -379,6 +417,7 @@ def estado(desde):
         "espera": max(0, round(t.proxima - time.time())) if t.rodando and t.proxima else None,
         "pasta": pasta_destino.ler(),
         "pasta_efetiva": pasta_efetiva(),
+        "disco": disco(),
         "registro": contar_registro(),
         "log": LOG.ler(desde),
     }
