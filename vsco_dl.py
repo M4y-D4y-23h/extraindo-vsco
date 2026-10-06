@@ -585,7 +585,7 @@ def _baixar_fatia(fatia, outdir, progresso, motivos):
                     break
                 if len(fatia) > PAGE_SIZE and coordenacao.outra_esperando():
                     _log(f"\n  >>> Outra linha de execução pediu vez: o resto deste perfil sai em fatias de "
-                         f"{PAGE_SIZE}, alternando com ela.")
+                         f"{PAGE_SIZE}, alternando com as outras linhas.")
                     interrompido = True
                     break
         finally:
@@ -632,7 +632,7 @@ def download_all(entries, outdir, links_only=False, ceder_vez=None, contexto=Non
     ceder_vez: função opcional; enquanto devolver True, o lote é dividido em fatias de PAGE_SIZE
     fotos para que outra thread (ex.: a listagem do próximo perfil) consiga vagas no RITMO entre
     uma fatia e outra. O mesmo vale enquanto houver outra linha de execução ativa. Sem nenhuma das
-    duas, o perfil inteiro sai de um único processo curl.
+    duas coisas, o perfil inteiro sai de um único processo curl.
     contexto: campos para o log de erros (perfil, site_id...), onde vão as mídias que falharam.
     Levanta espaco_disco.SemEspaco se o disco de `outdir` chegar ao limite de segurança."""
     os.makedirs(outdir, exist_ok=True)
@@ -686,7 +686,7 @@ def download_all(entries, outdir, links_only=False, ceder_vez=None, contexto=Non
             if repetir:
                 RITMO.liberar(fim)  # o curl foi interrompido: as vagas que sobraram voltam
                 if coordenacao.outra_esperando():
-                    _parada.wait(0.5)  # a próxima vaga é da outra linha, que pediu primeiro
+                    _parada.wait(0.5)  # a próxima vaga é de quem pediu primeiro
             diretos += retentar
             pendentes = repetir + pendentes
     for entry, path in diretos:

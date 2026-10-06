@@ -48,5 +48,6 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-%PY% painel.py
+rem quantas abas (linhas de execucao): o painel mede a CPU e a RAM; "Painel.bat --linhas 2" escolhe na mao
+%PY% painel.py %*
 if errorlevel 1 pause

@@ -5,9 +5,9 @@ Formato do arquivo (texto, append-only, 1 perfil por linha, separado por TAB):
     site_id    username    data_utc    status    midias
 Linhas começando com '#' são comentários. Linhas repetidas são inofensivas.
 
-Duas linhas de execução (as abas do painel, ou dois terminais) usam o mesmo arquivo: cada consulta
-lê antes as linhas que a outra acrescentou (só o que é novo, a partir de onde parou), e cada
-gravação é feita sob a trava de coordenacao.exclusivo, para duas linhas nunca se misturarem.
+Todas as linhas de execução (as abas do painel, ou terminais) usam o mesmo arquivo: cada consulta
+lê antes as linhas que as outras acrescentaram (só o que é novo, a partir de onde parou), e cada
+gravação é feita sob a trava de coordenacao.exclusivo, para duas gravações nunca se misturarem.
 
 Por que não é só um set() de strings:
   O arquivo pode crescer para milhões de linhas. Um set de strings em Python gasta ~100 bytes

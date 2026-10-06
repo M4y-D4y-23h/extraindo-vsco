@@ -1,23 +1,23 @@
 """
-Coordenação entre linhas de execução: as abas Linha 1 e Linha 2 do painel, ou dois terminais
-rodando os scripts ao mesmo tempo.
+Coordenação entre linhas de execução: as abas Linha 1, Linha 2... do painel (quantas couberem no
+computador, ver capacidade.py), ou terminais rodando os scripts ao mesmo tempo.
 
 Cada linha é um processo à parte (vsco_dl.py / vsco_search_dl.py), mas todas saem do mesmo
 computador e do mesmo IP: para o Cloudflare do vsco.co elas são uma execução só. Por isso, o que já
 valia entre as threads de um processo passa a valer entre os processos:
 
-  - Ritmo (--rps): um limite só para o computador inteiro. As linhas dividem as mesmas vagas: duas
-    linhas a 1,5 req/s somam 1,5 req/s, e não 3 (ver vsco_dl.Ritmo).
+  - Ritmo (--rps): um limite só para o computador inteiro. As linhas dividem as mesmas vagas: várias
+    linhas a 1,5 req/s somam 1,5 req/s, e não 1,5 cada (ver vsco_dl.Ritmo).
   - Vez: enquanto houver outra linha ativa, os lotes de fotos saem em fatias de PAGE_SIZE e as vagas
     se alternam entre as linhas. Um lote grande que já estava rodando quando a outra linha pediu
-    vaga é interrompido e dividido (ver outra_esperando): a outra espera no máximo uma fatia.
+    vaga é interrompido e dividido (ver outra_esperando): quem pediu espera no máximo uma fatia.
   - Pausa de bloqueio: quando uma linha vê a página de bloqueio, todas param. A que viu conduz a
     pausa e a requisição de teste; as outras esperam o resultado.
   - Bloqueio confirmado: todas as linhas em andamento param com o código 3.
   - Perfil em andamento: duas linhas nunca baixam o mesmo perfil ao mesmo tempo (reservar_perfil).
-    A que chega depois pula o perfil; quando a outra terminar, ele estará no registro.
+    A que chega depois pula o perfil; quando a dona terminar, ele estará no registro.
   - Arquivos compartilhados (registro de perfis, log de erros): gravados um bloco por vez
-    (exclusivo), para os de uma linha nunca se misturarem com os da outra.
+    (exclusivo), para os de uma linha nunca se misturarem com os das outras.
 
 O estado fica num JSON pequeno na pasta temporária do usuário (ESTADO), lido e gravado sob uma trava
 de arquivo (msvcrt no Windows, fcntl nos outros sistemas). Cada processo dá sinal de vida a cada
@@ -275,11 +275,16 @@ def reservar(segundos, teto):
     em instantes."""
     with _estado() as st:
         agora = time.time()
-        st["linhas"][EU] = agora
         inicio = max(agora, st.get("prox", 0))
         if inicio - agora > teto and st.get("dono") != EU:
-            st["esperando"][EU] = agora
+            # esperando: a marca é renovada só de vez em quando (várias linhas podem esperar juntas e
+            # perguntar várias vezes por segundo; não precisa gravar o arquivo a cada pergunta)
+            if agora - st["esperando"].get(EU, 0) > ESPERA_S / 4:
+                st["esperando"][EU] = agora
+            if agora - st["linhas"].get(EU, 0) > SINAL_S / 2:
+                st["linhas"][EU] = agora
             return None
+        st["linhas"][EU] = agora
         st["esperando"].pop(EU, None)
         st["prox"], st["dono"] = inicio + segundos, EU
         return inicio, inicio + segundos

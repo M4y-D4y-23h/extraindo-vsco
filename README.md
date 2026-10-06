@@ -21,9 +21,10 @@ Principais características:
 - **Limite de segurança de espaço em disco** (`--espaco-minimo`, padrão 2 GB; liga/desliga nas *Opções
   avançadas* do painel): os downloads param antes de o disco de destino (C:, outro HD, pendrive, cartão)
   ficar sem espaço. Ver *Limite de espaço em disco*.
-- **Duas linhas de execução** (abas *Linha 1* e *Linha 2* do painel): cada aba roda o seu trabalho ao
-  mesmo tempo que a outra (ex.: a Linha 1 pesquisa "isabela" e a Linha 2 baixa uma lista de perfis),
-  dividindo o mesmo ritmo e parando juntas num bloqueio. Ver *Duas linhas de execução*.
+- **Várias linhas de execução** (abas *Linha 1*, *Linha 2*... do painel): cada aba roda o seu trabalho ao
+  mesmo tempo que as outras (ex.: a Linha 1 pesquisa "isabela" e a Linha 2 baixa uma lista de perfis),
+  dividindo o mesmo ritmo e parando juntas num bloqueio. **O número de abas é calculado sozinho** pela CPU
+  e pela RAM do computador que abre o painel. Ver *Linhas de execução*.
 
 ---
 
@@ -86,6 +87,7 @@ Para só instalar/atualizar, sem abrir o painel: `python dependencias.py`.
 | `pasta_destino.py` | Mostra/define a pasta padrão onde os downloads são salvos (`pasta_destino.txt`). |
 | `espaco_disco.py` | Limite de segurança de espaço em disco (`--espaco-minimo`): confere o espaço livre do disco de destino e para tudo antes de ele encher. |
 | `coordenacao.py` | Coordena as linhas de execução (abas do painel ou terminais rodando ao mesmo tempo): ritmo dividido, pausa/bloqueio em conjunto, perfil em andamento. O estado fica em `%TEMP%\vsco_linhas`. |
+| `capacidade.py` | Mede a CPU e a RAM e calcula quantas linhas de execução (abas) o painel abre. `python capacidade.py` mostra a conta. |
 | `pasta_destino.txt` | Criado por `pasta_destino.py`. Uma linha com a pasta base (pode ser editado no Bloco de Notas). |
 | `perfis_acessados.txt` | Criado automaticamente na primeira execução. Histórico de perfis já processados. |
 | `vsco_sessao.txt` | Opcional, criado por você. Token da sua sessão logada, usado só na pesquisa (ver *Erro de autenticação na pesquisa*).
@@ -103,9 +105,10 @@ as dependências (ver *Requisitos*); o `python painel.py` abre direto. O navegad
 - **Onde salvar**: mostra/troca a pasta padrão (digitando ou pelo botão *Escolher pasta…*) e abre a
   pasta no Explorer. Trocar durante um download vale a partir do próximo perfil. Mostra também o
   **espaço livre** do disco dessa pasta (em vermelho quando está abaixo do limite de segurança).
-- **Linha 1 / Linha 2** (no topo): duas linhas de execução, cada uma com o seu formulário, os seus
-  botões e o seu andamento. O cartão de cada linha mostra o estado dela e o que está rodando
-  (ex.: `pesquisa "isabela"`). Clique numa linha para ver/controlar o que é dela.
+- **Linha 1, Linha 2...** (no topo): as linhas de execução, cada uma com o seu formulário, os seus
+  botões e o seu andamento. São tantas quantas cabem na CPU e na RAM do computador (logo abaixo das
+  abas o painel diz quantas e por quê). O cartão de cada linha mostra o estado dela e o que está
+  rodando (ex.: `pesquisa "isabela"`). Clique numa linha para ver/controlar o que é dela.
 - **O que baixar** (de cada linha): abas *Um perfil*, *Pesquisa* e *Lista* (carrega um `.txt` da pasta
   do projeto, como `variacoes_isabela.txt`, e roda um item por vez; dá para começar de um item específico).
   As *Opções avançadas* têm ritmo, pausa no bloqueio, subpasta, resolução original, `--forcar`, só links
@@ -116,11 +119,11 @@ as dependências (ver *Requisitos*); o `python painel.py` abre direto. O navegad
 Detalhes:
 
 - Deixe a janela preta do `Painel.bat` aberta; fechar ela encerra o painel (e os downloads em andamento).
-- Cada linha roda uma execução por vez; as duas linhas podem rodar ao mesmo tempo, sem dobrar o ritmo
-  de requisições (ver *Duas linhas de execução*). *Parar agora* numa linha não mexe na outra.
-- A pasta de destino (*Onde salvar*), o registro de perfis e o `erros.log` são os mesmos para as duas.
+- Cada linha roda uma execução por vez; as linhas podem rodar ao mesmo tempo, sem somar ritmos de
+  requisição (ver *Linhas de execução*). *Parar agora* numa linha não mexe nas outras.
+- A pasta de destino (*Onde salvar*), o registro de perfis e o `erros.log` são os mesmos para todas.
 - Numa lista, um bloqueio confirmado (código 3) ou o disco no limite de espaço (código 4) interrompe a
-  lista inteira e o painel diz de qual item retomar. Um bloqueio confirmado numa linha para a outra também.
+  lista inteira e o painel diz de qual item retomar. Um bloqueio confirmado numa linha para as outras também.
 - Qualquer outro erro (código 1 etc.) **não para nada**: o painel mostra
   `*** <item>: terminou com erro (código 1), registrado em erros.log; o painel seguiu para o próximo item.`,
   conta o item como erro e segue para o próximo da fila. O botão **Abrir log de erros** abre o `erros.log`.
@@ -131,47 +134,78 @@ Detalhes:
 
 Os comandos abaixo continuam funcionando do mesmo jeito para quem preferir o terminal.
 
-### Duas linhas de execução
+### Linhas de execução
 
-Cada aba (*Linha 1*, *Linha 2*) é um processo à parte, mas as duas saem do mesmo computador e do
-mesmo IP: para o Cloudflare do vsco.co elas são uma execução só. Por isso elas combinam entre si
-(`coordenacao.py`), da mesma forma que as threads de um script já combinavam:
+#### Quantas abas
 
-| O quê | Como fica com duas linhas |
+Toda vez que o painel abre (`Painel.bat` ou `python painel.py`), ele mede o computador
+(`capacidade.py`) e cria uma aba para cada linha que cabe na CPU **e** na RAM:
+
+| Limite | Regra | Por quê |
+|---|---|---|
+| CPU | 1 linha por processador lógico | Cada linha usa menos de 1% de um núcleo em média, mas tem os seus processos (Python, `curl`, `ffmpeg` nos vídeos HLS) e picos ao abrir cada um e quando o antivírus confere cada arquivo. Um processador por linha deixa folga de sobra. |
+| RAM | no máximo 1/4 da RAM **livre** na hora, a 80 MB por linha | Medido: ~46 MB por linha (script ~20 MB + `curl` ~11 MB + andamento no navegador até ~15 MB); os 80 MB incluem folga para o `ffmpeg`. Os outros 3/4 ficam para o Windows, o navegador e os outros programas. |
+| Teto | 8 linhas | O ritmo do site é um só para o computador inteiro (ver abaixo): mais abas só deixariam cada uma mais lenta, sem baixar mais. |
+| Piso | 1 linha | O painel sempre abre com pelo menos uma. |
+
+Vale o menor dos três. Logo abaixo das abas o painel mostra a conta, ex.:
+
+```
+4 linhas de execução para este computador (limitado pela CPU). CPU: Intel(R) Core(TM) i5-3470 CPU @ 3.20GHz,
+4 processadores lógicos -> até 4; RAM: 1,79 GB livres de 3,90 GB -> até 5.
+```
+
+Exemplos (a RAM livre muda conforme o que está aberto, então o número pode variar de uma vez para outra):
+
+| Computador | RAM livre ao abrir | Abas |
+|---|---|---|
+| Core i5-3470 (4 processadores lógicos), 4 GB | ~1,8 GB | 4 (pela CPU) |
+| o mesmo, com o navegador cheio de abas | ~1 GB | 3 (pela RAM) |
+| o mesmo, com a RAM quase toda ocupada | 250 MB | 1 (o mínimo) |
+| dual-core sem Hyper-Threading, 4 GB | ~2 GB | 2 (pela CPU) |
+| 8 núcleos / 16 threads, 16 GB | ~10 GB | 8 (pelo teto) |
+
+Para escolher na mão: `Painel.bat --linhas 2` ou `python painel.py --linhas 2` (de 1 a 32). Para só ver
+a conta, sem abrir o painel: `python capacidade.py`.
+
+#### Como as linhas convivem
+
+Cada aba é um processo à parte, mas todas saem do mesmo computador e do mesmo IP: para o Cloudflare do
+vsco.co elas são uma execução só. Por isso elas combinam entre si (`coordenacao.py`), da mesma forma que
+as threads de um script já combinavam:
+
+| O quê | Como fica com várias linhas |
 |---|---|
-| Ritmo (`--rps`) | **Um limite para o computador inteiro.** As duas dividem as mesmas vagas: com 1,5 nas duas, a soma é 1,5 req/s, e não 3. |
-| Vez | Enquanto as duas rodam, as fotos saem em fatias de 14 e as vagas se alternam. Se uma linha começa enquanto a outra está num perfil grande (um lote só), o lote é dividido na hora (`>>> Outra linha de execução pediu vez`). |
-| Pausa de bloqueio | Quando uma linha vê a página de bloqueio, **as duas** pausam. A que viu faz a requisição de teste; a outra espera o resultado. |
-| Bloqueio confirmado | As duas param com o código 3 (inclusive uma que estava só esperando a próxima rodada). |
-| Mesmo perfil nas duas | Nunca é baixado duas vezes ao mesmo tempo: a linha que chega depois mostra `<perfil> pulado: a outra linha de execução está baixando este perfil` e segue (não conta para o *Perfis novos*). Quando a outra termina, o perfil está no registro, que cada linha relê antes de consultar. |
+| Ritmo (`--rps`) | **Um limite para o computador inteiro.** As linhas dividem as mesmas vagas: com 1,5 em todas, a soma é 1,5 req/s, e não 1,5 cada. |
+| Vez | Enquanto há mais de uma rodando, as fotos saem em fatias de 14 e as vagas se alternam. Se uma linha começa enquanto outra está num perfil grande (um lote só), o lote é dividido na hora (`>>> Outra linha de execução pediu vez`). |
+| Pausa de bloqueio | Quando uma linha vê a página de bloqueio, **todas** pausam. A que viu faz a requisição de teste; as outras esperam o resultado. |
+| Bloqueio confirmado | Todas param com o código 3 (inclusive as que estavam só esperando a próxima rodada). |
+| Mesmo perfil em duas | Nunca é baixado duas vezes ao mesmo tempo: a linha que chega depois mostra `<perfil> pulado: outra linha de execução está baixando este perfil` e segue (não conta para o *Perfis novos*). Quando a dona termina, o perfil está no registro, que cada linha relê antes de consultar. |
 | Registro e `erros.log` | Os mesmos arquivos; cada gravação é feita sob uma trava, sem misturar as linhas. |
 
-**O que se ganha**: rodar dois trabalhos diferentes ao mesmo tempo (ex.: uma pesquisa repetindo sem
-parar numa linha e uma lista de perfis na outra), cada um com o seu andamento, e aproveitar as folgas
-de uma linha (listagem, espera entre rodadas) com os downloads da outra. **O que não se ganha**: o
-dobro de fotos por hora. Quem limita a velocidade é o ritmo que o site tolera vindo de um IP, não o
-computador. Para ir mais rápido, aumente o `--rps` (o mesmo valor nas duas linhas), sabendo que o risco
-de bloqueio aumenta igual.
+**O que se ganha**: rodar vários trabalhos diferentes ao mesmo tempo (ex.: uma pesquisa repetindo sem
+parar numa linha e uma lista de perfis em outra), cada um com o seu andamento, e aproveitar as folgas
+de uma linha (listagem, espera entre rodadas) com os downloads das outras. **O que não se ganha**: mais
+fotos por hora. Quem limita a velocidade é o ritmo que o site tolera vindo de um IP, não o computador:
+com 4 linhas, cada uma anda a ~1/4 do ritmo. Para ir mais rápido, aumente o `--rps` (o mesmo valor em
+todas as linhas), sabendo que o risco de bloqueio aumenta igual.
 
 O estado da combinação fica num arquivo pequeno em `%TEMP%\vsco_linhas`. Se uma linha for encerrada à
-força, o que ela tinha reservado (vagas, perfil em andamento) volta a ficar livre em 20 s. Dois terminais
+força, o que ela tinha reservado (vagas, perfil em andamento) volta a ficar livre em 20 s. Terminais
 rodando os scripts ao mesmo tempo combinam do mesmo jeito.
 
-**Consumo** (medido no Linux, com um servidor de teste no lugar do vsco.co e as duas linhas baixando a
-1,5 req/s; no Windows a ordem de grandeza é a mesma):
+**Consumo** (medido no Linux, com um servidor de teste no lugar do vsco.co; no Windows a ordem de
+grandeza é a mesma):
 
-| Processo | Memória (pico) | CPU |
+| | 2 linhas a 1,5 req/s | 4 linhas a 3 req/s |
 |---|---|---|
-| painel (`painel.py`) | ~23 MB | — |
-| cada linha: script Python | ~19–20 MB | — |
-| cada linha: `curl` | ~11 MB | — |
-| **total, painel + 2 linhas** | **~72 MB** | **< 1% de um núcleo** |
-| aba do navegador com o painel | ~3 MB de JavaScript no início; o andamento guarda no máximo 4.000 linhas por linha de execução | — |
+| Memória (pico, painel + linhas + `curl`) | ~72 MB | ~107 MB |
+| CPU (média, de um núcleo) | < 1% | ~2% |
+| Navegador, por aba de linha | ~1,5 MB vazia; até ~15 MB com o andamento cheio (4.000 linhas) | |
 
-Ou seja, num computador modesto (ex.: Core i5-3470, 4 GB de RAM, vídeo integrado) as duas linhas cabem
-com folga: o que mais pesa é o próprio navegador. Deixe aberta só a aba do painel; o painel não usa a
-placa de vídeo além de desenhar a página. Disco e rede também ficam folgados: a 1,5 req/s com fotos de
-~25 KB são ~40 KB/s, o mesmo de uma linha só, porque o ritmo é dividido.
+O que mais pesa num computador de 4 GB é o próprio navegador: deixe aberta só a aba do painel. O painel
+não usa a placa de vídeo além de desenhar a página. Disco e rede não mudam com o número de linhas,
+porque o ritmo é dividido (a 1,5 req/s com fotos de ~25 KB são ~40 KB/s no total).
 
 ### Pasta de destino
 
@@ -410,14 +444,14 @@ Cada resposta é conferida. Se vier a página de bloqueio do Cloudflare (*"Sorry
 blocked"*, *"Attention Required!"*, desafio *"Just a moment..."* ou o limite *"You are being rate
 limited"*), ou 5 respostas 403/429 seguidas (rede de segurança se a página mudar):
 
-1. **Pausa**: todas as threads, das duas linhas de execução, param na hora e o `curl` em andamento é
+1. **Pausa**: todas as threads, de todas as linhas de execução, param na hora e o `curl` em andamento é
    encerrado. Nenhuma requisição sai durante a pausa (`--pausa-bloqueio`, padrão 5 min).
 2. **Teste**: ao fim da pausa sai **uma** requisição, para a mesma URL que foi recusada.
 3. **Decisão**:
    - se o teste passar, foi uma recusa isolada (acontece de vez em quando mesmo sem bloqueio de
      verdade): o download continua de onde parou, incluindo a foto recusada;
    - se o teste também for recusado, o bloqueio está confirmado: aparece a mensagem com o texto da
-     página, o *Ray ID* e a URL, e o script sai com código **3** (a outra linha também para).
+     página, o *Ray ID* e a URL, e o script sai com código **3** (as outras linhas também param).
 
 São no máximo 3 pausas por execução; depois disso, o próximo bloqueio encerra direto (sem pausa),
 para uma execução noturna não ficar horas insistindo num site que bloqueia a toda hora. Com

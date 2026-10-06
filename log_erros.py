@@ -19,7 +19,7 @@ Exemplo:
     o que foi feito: perfil pulado (não entrou no registro)
     comando:         vsco_dl.py --rps 1.5 --pausa-bloqueio 5 -- vdvdvdvdvdvdgdgg
 
-Cada bloco é gravado de uma vez e salvo na hora, sob a trava de coordenacao.exclusivo: as duas
+Cada bloco é gravado de uma vez e salvo na hora, sob a trava de coordenacao.exclusivo: todas as
 linhas de execução do painel gravam no mesmo arquivo sem misturar os blocos. Se não der para gravar
 (disco cheio, arquivo aberto/travado), o aviso vai para a tela e a execução continua.
 """

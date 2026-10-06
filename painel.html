@@ -47,7 +47,8 @@
   .abas button + button { border-left: 1px solid var(--borda); }
   .abas button.ativa { background: var(--acento); color: var(--acento-txt); font-weight: 600; }
   /* abas das linhas de execução: cada uma com o seu formulário e o seu andamento */
-  .linhas { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .linhas { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+  #capacidade { margin: 8px 0 16px; }
   .linhas button { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; text-align: left;
                    padding: 10px 14px; border-radius: 10px; background: var(--card); min-width: 0; }
   .linhas button.ativa { border-color: var(--acento); box-shadow: inset 0 0 0 1px var(--acento); }
@@ -88,6 +89,7 @@
   </header>
 
   <nav class="linhas" id="linhas" aria-label="Linhas de execução"></nav>
+  <p class="dica" id="capacidade">__CAPACIDADE__</p>
 
   <div class="grade" id="grade">
     <section class="card">
@@ -171,7 +173,7 @@
         </div>
       </div>
       <p class="dica">O ritmo é do computador inteiro: as linhas dividem as mesmas vagas (o IP é um só).
-        Duas linhas a 1,5 somam 1,5 req/s, e não 3.</p>
+        Várias linhas a 1,5 somam 1,5 req/s no total, e não 1,5 cada.</p>
       <label for="subpasta">Subpasta dentro da pasta padrão (opcional)</label>
       <input type="text" id="subpasta" placeholder="Ex.: busca_isabela — vazio = uma pasta por perfil/pesquisa">
       <label class="check"><input type="checkbox" id="original"> Resolução original (bem maior que ~300 px)</label>
@@ -207,7 +209,7 @@
 
 <script>
 const TOKEN = "__TOKEN__";
-const N_LINHAS = Number("__LINHAS__") || 2;
+const N_LINHAS = Number("__LINHAS__") || 1;  // quantas couberam neste computador (capacidade.py)
 const $ = (id) => document.getElementById(id);
 const CAMPOS = ["alvoPerfil", "alvoPesquisa", "lista", "como", "inicio", "n", "rps", "pausa", "subpasta", "original", "forcar", "links",
                 "limiteEspaco", "espacoMinimo"];

@@ -6,18 +6,19 @@ Painel local para rodar os downloads sem digitar comandos.
 Abre http://127.0.0.1:8765 no navegador. O painel só aceita conexões do próprio computador.
 Por baixo ele roda os mesmos scripts (vsco_dl.py / vsco_search_dl.py) e mostra a saída deles ao vivo.
 
-  - Linhas de execução: as abas Linha 1 e Linha 2 (N_LINHAS) rodam cada uma a sua execução, ao mesmo
-    tempo (ex.: a Linha 1 pesquisa "isabela" e a Linha 2 baixa uma lista de perfis). Cada linha tem o
-    seu formulário, os seus botões e o seu andamento; dentro de uma linha, um comando por vez.
-    As linhas dividem o MESMO ritmo de requisições (o IP é um só) e param juntas num bloqueio; um
-    perfil que uma linha está baixando é pulado pela outra (ver coordenacao.py).
-  - Pasta de destino: a mesma de pasta_destino.py, para as duas linhas; trocar no painel vale na
+  - Linhas de execução: as abas Linha 1, Linha 2... rodam cada uma a sua execução, ao mesmo tempo
+    (ex.: a Linha 1 pesquisa "isabela" e a Linha 2 baixa uma lista de perfis). Quantas abas: as que
+    cabem na CPU e na RAM deste computador, medidas quando o painel abre (ver capacidade.py; --linhas N
+    escolhe na mão). Cada linha tem o seu formulário, os seus botões e o seu andamento; dentro de uma
+    linha, um comando por vez. As linhas dividem o MESMO ritmo de requisições (o IP é um só) e param
+    juntas num bloqueio; um perfil que uma linha está baixando é pulado pelas outras (ver coordenacao.py).
+  - Pasta de destino: a mesma de pasta_destino.py, para todas as linhas; trocar no painel vale na
     hora, inclusive para as execuções em andamento (a partir do próximo perfil).
   - Parar: envia Ctrl+Break ao script, que encerra como num Ctrl+C (o curl é interrompido, arquivos
     parciais são apagados e o resumo é impresso). Se não responder em 15 s, é encerrado à força.
   - Lista: roda um item por vez; um bloqueio confirmado (código 3) ou o disco no limite de espaço
     (código 4) interrompe a lista inteira. Qualquer outro erro não para nada: o item é contado como
-    erro e a lista segue para o próximo. Um bloqueio confirmado numa linha para a outra também.
+    erro e a lista segue para o próximo. Um bloqueio confirmado numa linha para as outras também.
   - Pesquisa (e lista de pesquisas): ao terminar a rodada, espera INTERVALO_REPETICAO segundos e roda
     tudo de novo, indefinidamente. Só o bloqueio (código 3) e o disco no limite (código 4) encerram
     a repetição.
@@ -25,12 +26,13 @@ Por baixo ele roda os mesmos scripts (vsco_dl.py / vsco_search_dl.py) e mostra a
     destino fica com menos GB livres que o limite (ver espaco_disco.py). Já abaixo do limite, o
     Iniciar recusa e diz o porquê. O espaço livre aparece no card "Onde salvar".
   - Erros: os scripts gravam cada erro, com os detalhes, em erros.log (ver log_erros.py), o mesmo
-    para as duas linhas. Se um item terminar com erro sem ter gravado nada lá (ex.: o script quebrou
+    para todas as linhas. Se um item terminar com erro sem ter gravado nada lá (ex.: o script quebrou
     ao iniciar), o painel grava o comando, o código de saída e as últimas linhas da saída.
 
-Opções: --porta N (padrão 8765), --sem-navegador
+Opções: --porta N (padrão 8765), --sem-navegador, --linhas N (padrão: pela capacidade do computador)
 """
 import codecs
+import html
 import http.server
 import json
 import os
@@ -44,6 +46,7 @@ import time
 import urllib.parse
 import webbrowser
 
+import capacidade
 import espaco_disco
 import log_erros
 import pasta_destino
@@ -62,8 +65,8 @@ SAIDA_INTERROMPIDO = 130  # Ctrl+C/Parar: não é erro
 INTERVALO_REPETICAO = 10  # segundos entre uma rodada de pesquisa e a próxima
 LINHAS_NO_LOG = 30  # linhas finais da saída que o painel grava no erros.log quando o script não gravou nada
 NAO_SAO_LISTAS = {"perfis_acessados.txt", "pasta_destino.txt", "vsco_sessao.txt", "requirements.txt"}
-N_LINHAS = 2  # abas do painel; cada uma roda a sua execução, ao mesmo tempo que as outras
 porta = PORTA_PADRAO
+CAPACIDADE = {"linhas": 1, "texto": ""}  # quantas linhas abrir e o porquê (capacidade.calcular, em main)
 
 
 # ---------------------------------------------------------------- log ao vivo
@@ -149,7 +152,7 @@ class Tarefa:
     def iniciar(self, titulo, comandos, repetir=False):
         with self._lock:
             if self.rodando:
-                raise ValueError(f"A Linha {self.numero} já está rodando: pare-a ou use a outra linha.")
+                raise ValueError(f"A Linha {self.numero} já está rodando: pare-a ou use outra linha.")
             self.parar_agora = self.parar_depois = self.bloqueio_outra = False
             self.titulo, self.item, self.codigo = titulo, None, None
             self.inicio, self.fim = time.time(), None
@@ -289,7 +292,7 @@ class Tarefa:
                 proc.kill()
 
 
-LINHAS = [Tarefa(n) for n in range(1, N_LINHAS + 1)]
+LINHAS = []  # uma Tarefa por aba; criadas em main, conforme a capacidade do computador
 
 
 def linha(cfg):
@@ -308,7 +311,7 @@ def parar_por_bloqueio(origem):
         if t is not origem and t.rodando and not t.bloqueio_outra and t.codigo != SAIDA_BLOQUEIO:
             t.bloqueio_outra = True
             t.log.linha(f"*** Bloqueio confirmado na Linha {origem.numero}: esta linha também parou "
-                        "(as duas usam o mesmo IP). Espere o bloqueio passar e inicie de novo.")
+                        "(todas usam o mesmo IP). Espere o bloqueio passar e inicie de novo.")
             t.parar()
 
 
@@ -461,7 +464,7 @@ def estado_linha(t, desde):
 
 def estado(desdes):
     """Estado das linhas (desdes = posição do log que o navegador já tem, uma por linha) e o que é comum."""
-    desdes = list(desdes) + [0] * N_LINHAS
+    desdes = list(desdes) + [0] * len(LINHAS)
     return {
         "linhas": [estado_linha(t, d) for t, d in zip(LINHAS, desdes)],
         "pasta": pasta_destino.ler(),
@@ -522,7 +525,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             if url.path == "/":
                 with open(HTML, encoding="utf-8") as f:
-                    pagina = f.read().replace("__TOKEN__", TOKEN).replace("__LINHAS__", str(N_LINHAS))
+                    pagina = (f.read().replace("__TOKEN__", TOKEN).replace("__LINHAS__", str(len(LINHAS)))
+                              .replace("__CAPACIDADE__", html.escape(CAPACIDADE["texto"])))
                 self._enviar(pagina.encode(), "text/html; charset=utf-8")
             elif url.path == "/api/estado":
                 self._json(estado(int(d) for d in q.get("desde", "0").split(",") if d.strip()))
@@ -579,10 +583,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    global porta
+    global porta, CAPACIDADE
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     args = sys.argv[1:]
     inicial = int(args[args.index("--porta") + 1]) if "--porta" in args else PORTA_PADRAO
+    forcado = None
+    if "--linhas" in args:
+        try:
+            forcado = int(args[args.index("--linhas") + 1])
+        except (IndexError, ValueError):
+            forcado = 0
+        if not 1 <= forcado <= capacidade.MAXIMO_FORCADO:
+            sys.exit(f"--linhas precisa de um número de 1 a {capacidade.MAXIMO_FORCADO}.")
+    CAPACIDADE = capacidade.calcular(forcado)
+    LINHAS[:] = [Tarefa(n) for n in range(1, CAPACIDADE["linhas"] + 1)]
+    print(CAPACIDADE["texto"])
     for porta in range(inicial, inicial + 20):  # se a porta estiver ocupada, tenta as seguintes
         try:
             servidor = http.server.ThreadingHTTPServer(("127.0.0.1", porta), Handler)

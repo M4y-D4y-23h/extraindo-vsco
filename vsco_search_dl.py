@@ -27,8 +27,8 @@ Registro de perfis (perfis_acessados.txt, ver registro_perfis.py):
     N perfis novos).
   - Perfis baixados sem falhas e perfis vazios entram no registro. Perfis com erro de rede ou com
     alguma foto que falhou não entram, para serem tentados de novo na próxima execução.
-  - Duas linhas de execução (as abas do painel, ou dois terminais) com pesquisas parecidas: um perfil
-    que a outra linha está baixando agora é pulado (não conta para o -n); quando ela terminar, ele
+  - Várias linhas de execução (as abas do painel, ou terminais) com pesquisas parecidas: um perfil
+    que outra linha está baixando agora é pulado (não conta para o -n); quando ela terminar, ele
     estará no registro, que é relido a cada consulta (ver coordenacao.py).
   - Se vier a página de bloqueio do Cloudflare, tudo pausa (--pausa-bloqueio, padrão 5 min) e sai
     uma requisição de teste. Se ela for recusada também, tudo para (código de saída 3); o perfil em
@@ -250,7 +250,7 @@ def listar_perfis(args, registro, token, largura, fila, listando, encerrar):
             if site_id in registro and not args.forcar:
                 fila.put(("conhecido",))
                 continue
-            # a outra linha de execução está com ele: pula; quem solta o perfil é o consumidor, depois
+            # outra linha de execução está com ele: pula; quem solta o perfil é o consumidor, depois
             # de gravar no registro (ou pesquisar(), no fim da rodada)
             if not coordenacao.reservar_perfil(site_id):
                 fila.put(("outra linha", username))
@@ -328,7 +328,7 @@ def pesquisar(args, registro):
             if tipo == "conhecido":
                 known += 1
             elif tipo == "outra linha":
-                print(f"\n  {evento[1]} pulado: a outra linha de execução está baixando este perfil", file=sys.stderr)
+                print(f"\n  {evento[1]} pulado: outra linha de execução está baixando este perfil", file=sys.stderr)
                 outra.append(evento[1])
             elif tipo == "erro":
                 _, username, site_id, ex = evento
@@ -366,7 +366,7 @@ def pesquisar(args, registro):
         print(f"  perfis já no registro pulados: {known}", file=sys.stderr)
         print(f"  perfis vazios pulados: {len(empty)} {empty}", file=sys.stderr)
         if outra:
-            print(f"  perfis pulados por estarem com a outra linha de execução: {len(outra)} {outra}", file=sys.stderr)
+            print(f"  perfis pulados por estarem com outra linha de execução: {len(outra)} {outra}", file=sys.stderr)
         if errors:
             print(f"  perfis com erro pulados: {len(errors)} {errors}", file=sys.stderr)
     if len(done) < args.perfis:
