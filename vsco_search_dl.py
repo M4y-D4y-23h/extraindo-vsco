@@ -27,6 +27,9 @@ Registro de perfis (perfis_acessados.txt, ver registro_perfis.py):
     N perfis novos).
   - Perfis baixados sem falhas e perfis vazios entram no registro. Perfis com erro de rede ou com
     alguma foto que falhou não entram, para serem tentados de novo na próxima execução.
+  - Duas linhas de execução (as abas do painel, ou dois terminais) com pesquisas parecidas: um perfil
+    que a outra linha está baixando agora é pulado (não conta para o -n); quando ela terminar, ele
+    estará no registro, que é relido a cada consulta (ver coordenacao.py).
   - Se vier a página de bloqueio do Cloudflare, tudo pausa (--pausa-bloqueio, padrão 5 min) e sai
     uma requisição de teste. Se ela for recusada também, tudo para (código de saída 3); o perfil em
     andamento não entra no registro e é retomado na próxima execução.
@@ -63,6 +66,7 @@ import time
 import traceback
 import urllib.parse
 
+import coordenacao
 import espaco_disco
 import log_erros
 from pasta_destino import Destino
@@ -197,7 +201,8 @@ def main():
     with RegistroPerfis(args.registro) as registro:
         print(f"Registro: {len(registro)} perfis já acessados em {args.registro}", file=sys.stderr)
         if RITMO.rps:
-            print(f"Ritmo: até {RITMO.rps:g} req/s (~{round(RITMO.rps * 3600)} por hora)", file=sys.stderr)
+            print(f"Ritmo: até {RITMO.rps:g} req/s (~{round(RITMO.rps * 3600)} por hora), somando todas as linhas "
+                  "de execução", file=sys.stderr)
         rodada = 1
         while True:
             if not args.uma_vez:
@@ -245,12 +250,25 @@ def listar_perfis(args, registro, token, largura, fila, listando, encerrar):
             if site_id in registro and not args.forcar:
                 fila.put(("conhecido",))
                 continue
+            # a outra linha de execução está com ele: pula; quem solta o perfil é o consumidor, depois
+            # de gravar no registro (ou pesquisar(), no fim da rodada)
+            if not coordenacao.reservar_perfil(site_id):
+                fila.put(("outra linha", username))
+                continue
+            if encerrar.is_set():
+                coordenacao.soltar_perfil(site_id)
+                return
+            if site_id in registro and not args.forcar:  # a outra linha terminou entre a consulta e a reserva
+                coordenacao.soltar_perfil(site_id)
+                fila.put(("conhecido",))
+                continue
             avisos = []
             try:
                 entries = collect_entries(site_id, token, username, largura=largura, log=avisos.append)
             except Bloqueado:
                 raise
             except Exception as ex:
+                coordenacao.soltar_perfil(site_id)
                 fila.put(("erro", username, site_id, ex))
                 continue
             if not entries:
@@ -292,7 +310,7 @@ def pesquisar(args, registro):
     threading.Thread(target=listar_perfis, args=(args, registro, token, largura, fila, listando, encerrar),
                      daemon=True).start()
 
-    done, empty, errors, known = [], [], [], 0
+    done, empty, errors, known, outra = [], [], [], 0, []
     try:
         while True:
             try:
@@ -309,6 +327,9 @@ def pesquisar(args, registro):
                 raise evento[1]  # ErroAutenticacao, Bloqueado etc.: quem trata é o main
             if tipo == "conhecido":
                 known += 1
+            elif tipo == "outra linha":
+                print(f"\n  {evento[1]} pulado: a outra linha de execução está baixando este perfil", file=sys.stderr)
+                outra.append(evento[1])
             elif tipo == "erro":
                 _, username, site_id, ex = evento
                 print(f"\n  {username} pulado: erro ao listar ({ex})", file=sys.stderr)
@@ -322,6 +343,7 @@ def pesquisar(args, registro):
                 empty.append(username)
                 if not args.links_only:
                     registro.registrar(site_id, username, "vazio")
+                coordenacao.soltar_perfil(site_id)
             else:
                 _, username, site_id, entries, avisos, _ = evento
                 print(f"\n[{len(done) + 1}/{args.perfis}] {username} (site_id={site_id})", file=sys.stderr)
@@ -333,14 +355,18 @@ def pesquisar(args, registro):
                                                              "site_id": site_id})
                 if not args.links_only and not failed:
                     registro.registrar(site_id, username, "baixado", len(entries))
+                coordenacao.soltar_perfil(site_id)
                 done.append((username, len(entries), ok, skipped, failed))
     finally:
         encerrar.set()
+        coordenacao.soltar_perfis()
         print(f"\n===== Resumo ({destino.atual}) =====", file=sys.stderr)
         for username, total, ok, skipped, failed in done:
             print(f"  {username:<30} {total:>5} mídias  ok={ok} pulados={skipped} falhas={failed}", file=sys.stderr)
         print(f"  perfis já no registro pulados: {known}", file=sys.stderr)
         print(f"  perfis vazios pulados: {len(empty)} {empty}", file=sys.stderr)
+        if outra:
+            print(f"  perfis pulados por estarem com a outra linha de execução: {len(outra)} {outra}", file=sys.stderr)
         if errors:
             print(f"  perfis com erro pulados: {len(errors)} {errors}", file=sys.stderr)
     if len(done) < args.perfis:

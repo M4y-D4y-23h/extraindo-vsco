@@ -19,8 +19,9 @@ Exemplo:
     o que foi feito: perfil pulado (não entrou no registro)
     comando:         vsco_dl.py --rps 1.5 --pausa-bloqueio 5 -- vdvdvdvdvdvdgdgg
 
-Cada bloco é gravado de uma vez e salvo na hora. Se não der para gravar (disco cheio, arquivo
-aberto/travado), o aviso vai para a tela e a execução continua.
+Cada bloco é gravado de uma vez e salvo na hora, sob a trava de coordenacao.exclusivo: as duas
+linhas de execução do painel gravam no mesmo arquivo sem misturar os blocos. Se não der para gravar
+(disco cheio, arquivo aberto/travado), o aviso vai para a tela e a execução continua.
 """
 import os
 import subprocess
@@ -28,6 +29,8 @@ import sys
 import threading
 import traceback
 from datetime import datetime
+
+import coordenacao
 
 ARQUIVO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "erros.log")
 _lock = threading.Lock()
@@ -57,6 +60,18 @@ def tamanho():
         return 0
 
 
+def registrou(desde, comando):
+    """True se algum bloco gravado a partir da posição `desde` (de tamanho()) é do `comando`. Com duas
+    linhas rodando, o log pode ter crescido por causa da outra: o tamanho sozinho não basta."""
+    try:
+        with open(ARQUIVO, "rb") as f:
+            f.seek(desde)
+            novo = f.read()
+    except OSError:
+        return False
+    return comando.encode("utf-8") in novo
+
+
 def registrar(titulo, *, ex=None, acao=None, pilha=False, comando=None, **campos):
     """Acrescenta um erro ao log.
 
@@ -83,7 +98,7 @@ def registrar(titulo, *, ex=None, acao=None, pilha=False, comando=None, **campos
         linhas.extend(" " * (largura + 5) + l for l in resto)
     bloco = "\n".join(linhas) + "\n\n"
     try:
-        with _lock, open(ARQUIVO, "a", encoding="utf-8") as f:
+        with _lock, coordenacao.exclusivo(), open(ARQUIVO, "a", encoding="utf-8") as f:
             f.write(bloco)
     except OSError as erro:
         print(f"  aviso: não consegui gravar em {ARQUIVO} ({erro})", file=sys.stderr)

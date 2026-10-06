@@ -46,6 +46,13 @@
   .abas button { flex: 1; border: 0; border-radius: 0; background: transparent; }
   .abas button + button { border-left: 1px solid var(--borda); }
   .abas button.ativa { background: var(--acento); color: var(--acento-txt); font-weight: 600; }
+  /* abas das linhas de execução: cada uma com o seu formulário e o seu andamento */
+  .linhas { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .linhas button { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; text-align: left;
+                   padding: 10px 14px; border-radius: 10px; background: var(--card); min-width: 0; }
+  .linhas button.ativa { border-color: var(--acento); box-shadow: inset 0 0 0 1px var(--acento); }
+  .linhas .nome { font-weight: 700; }
+  .linhas .alvo { font-size: 13px; color: var(--mute); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dica { font-size: 13px; color: var(--mute); margin: 8px 0 0; }
   .check { display: flex; gap: 8px; align-items: center; margin: 8px 0 0; color: var(--txt); font-size: 14px; }
   details summary { cursor: pointer; color: var(--mute); font-size: 14px; margin-top: 14px; }
@@ -61,15 +68,15 @@
   .numeros b { color: var(--txt); font-size: 15px; }
   .numeros b.baixo { color: var(--erro); }
   .check input[type=number] { width: 72px; padding: 2px 6px; margin: 0 2px; }
-  #log { background: var(--log-bg); color: var(--log-txt); border-radius: 8px; padding: 12px;
+  .log { background: var(--log-bg); color: var(--log-txt); border-radius: 8px; padding: 12px;
          height: 440px; overflow: auto; margin: 0; font: 12.5px/1.45 Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
-  #log .t { color: #8fb4ff; font-weight: 700; }
-  #log .a { color: #f0b54a; }
-  #log .e { color: #ff7b7b; font-weight: 600; }
-  #log .p { color: #7ee2a8; }
-  #log .m { color: var(--log-mute); }
-  #msg { min-height: 20px; font-size: 14px; margin-top: 10px; }
-  #msg.erro { color: var(--erro); } #msg.ok { color: var(--ok); }
+  .log .t { color: #8fb4ff; font-weight: 700; }
+  .log .a { color: #f0b54a; }
+  .log .e { color: #ff7b7b; font-weight: 600; }
+  .log .p { color: #7ee2a8; }
+  .log .m { color: var(--log-mute); }
+  .msg { min-height: 20px; font-size: 14px; margin-top: 10px; }
+  .msg.erro { color: var(--erro); } .msg.ok { color: var(--ok); }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -80,7 +87,9 @@
     <span id="status" class="pilula">Carregando…</span>
   </header>
 
-  <div class="grade">
+  <nav class="linhas" id="linhas" aria-label="Linhas de execução"></nav>
+
+  <div class="grade" id="grade">
     <section class="card">
       <h2>Onde salvar</h2>
       <div class="caminho" id="pastaAtual">…</div>
@@ -93,135 +102,117 @@
         <button id="btnEscolher">Escolher pasta…</button>
         <button id="btnAbrir">Abrir no Explorer</button>
       </div>
-      <p class="dica">Pode trocar a qualquer momento, inclusive durante um download: vale a partir do próximo perfil.</p>
+      <p class="dica">Vale para todas as linhas. Pode trocar a qualquer momento, inclusive durante um download: vale a partir do próximo perfil.</p>
       <div class="numeros">
         <span>Perfis no registro<br><b id="registro">–</b></span>
         <span>Espaço livre <span id="disco"></span><br><b id="espaco">–</b></span>
       </div>
+      <div class="msg" id="msgPasta"></div>
     </section>
-
-    <section class="card">
-      <h2>O que baixar</h2>
-      <div class="abas" id="abas">
-        <button data-modo="perfil">Um perfil</button>
-        <button data-modo="pesquisa">Pesquisa</button>
-        <button data-modo="lista">Lista</button>
-      </div>
-
-      <div data-para="perfil">
-        <label for="alvoPerfil">Username ou link do perfil</label>
-        <input type="text" id="alvoPerfil" placeholder="Ex.: isahevangelista ou https://vsco.co/isahevangelista/gallery">
-      </div>
-
-      <div data-para="pesquisa">
-        <label for="alvoPesquisa">Termo de pesquisa</label>
-        <input type="text" id="alvoPesquisa" placeholder="Ex.: isabela">
-      </div>
-
-      <div data-para="lista">
-        <label for="arquivoLista">Carregar de um arquivo .txt da pasta do projeto</label>
-        <select id="arquivoLista"><option value="">— escolha —</option></select>
-        <label for="lista">Itens (um por linha; pode editar à vontade) — <span id="contaLista">0 itens</span></label>
-        <textarea id="lista" rows="7" placeholder="Isabela&#10;Isabella&#10;Izabela"></textarea>
-        <div class="cols">
-          <div>
-            <label for="como">Usar cada linha como</label>
-            <select id="como">
-              <option value="pesquisa">termo de pesquisa</option>
-              <option value="perfil">username exato</option>
-            </select>
-          </div>
-          <div>
-            <label for="inicio">Começar do item</label>
-            <input type="number" id="inicio" min="1" value="1">
-          </div>
-        </div>
-      </div>
-
-      <div data-para="pesquisa lista" id="blocoN">
-        <label for="n">Perfis novos por pesquisa</label>
-        <input type="number" id="n" min="1" value="10">
-      </div>
-
-      <details>
-        <summary>Opções avançadas</summary>
-        <div class="cols">
-          <div>
-            <label for="rps">Requisições por segundo</label>
-            <input type="number" id="rps" min="0" step="0.1" value="1.5">
-          </div>
-          <div>
-            <label for="pausa">Pausa no bloqueio (min)</label>
-            <input type="number" id="pausa" min="0" step="1" value="5">
-          </div>
-        </div>
-        <label for="subpasta">Subpasta dentro da pasta padrão (opcional)</label>
-        <input type="text" id="subpasta" placeholder="Ex.: busca_isabela — vazio = uma pasta por perfil/pesquisa">
-        <label class="check"><input type="checkbox" id="original"> Resolução original (bem maior que ~300 px)</label>
-        <label class="check"><input type="checkbox" id="forcar"> Baixar de novo perfis que já estão no registro</label>
-        <label class="check"><input type="checkbox" id="links"> Só gerar links.txt, sem baixar</label>
-        <label class="check"><input type="checkbox" id="limiteEspaco" checked>
-          <span>Parar quando o disco de destino ficar com menos de
-            <input type="number" id="espacoMinimo" min="0.1" step="0.5" value="2"> GB livres</span></label>
-        <p class="dica">Limite de segurança: vale para o disco onde a pasta está (C:, outro HD, pendrive…).
-          Ao chegar nele tudo para, o arquivo pela metade é apagado e o perfil é retomado na próxima vez.</p>
-      </details>
-
-      <div class="acoes">
-        <button class="primario" id="btnIniciar">▶ Iniciar</button>
-        <button id="btnPararDepois" hidden>Parar após o item atual</button>
-        <button class="perigo" id="btnParar" disabled>■ Parar agora</button>
-      </div>
-      <div id="msg"></div>
-    </section>
-
-    <section class="card inteiro">
-      <div class="linha" style="justify-content: space-between; margin-bottom: 10px;">
-        <h2 style="margin: 0;">Andamento</h2>
-        <div class="linha">
-          <label class="check" style="margin: 0;"><input type="checkbox" id="rolar" checked> Rolar automaticamente</label>
-          <button id="btnLog" title="Erros que não pararam a execução, com todos os detalhes">Abrir log de erros</button>
-          <button id="btnLimpar">Limpar tela</button>
-        </div>
-      </div>
-      <pre id="log"></pre>
-    </section>
+    <!-- aqui entram os cartões de cada linha (modeloLinha) -->
   </div>
 </main>
 
+<!-- Uma linha de execução: os ids ganham o sufixo "-<número da linha>" (ex.: alvoPerfil-2). -->
+<template id="modeloLinha">
+  <section class="card">
+    <h2>O que baixar — <span class="nomeLinha"></span></h2>
+    <div class="abas" id="abas">
+      <button data-modo="perfil">Um perfil</button>
+      <button data-modo="pesquisa">Pesquisa</button>
+      <button data-modo="lista">Lista</button>
+    </div>
+
+    <div data-para="perfil">
+      <label for="alvoPerfil">Username ou link do perfil</label>
+      <input type="text" id="alvoPerfil" placeholder="Ex.: isahevangelista ou https://vsco.co/isahevangelista/gallery">
+    </div>
+
+    <div data-para="pesquisa">
+      <label for="alvoPesquisa">Termo de pesquisa</label>
+      <input type="text" id="alvoPesquisa" placeholder="Ex.: isabela">
+    </div>
+
+    <div data-para="lista">
+      <label for="arquivoLista">Carregar de um arquivo .txt da pasta do projeto</label>
+      <select id="arquivoLista"><option value="">— escolha —</option></select>
+      <label for="lista">Itens (um por linha; pode editar à vontade) — <span id="contaLista">0 itens</span></label>
+      <textarea id="lista" rows="7" placeholder="Isabela&#10;Isabella&#10;Izabela"></textarea>
+      <div class="cols">
+        <div>
+          <label for="como">Usar cada linha como</label>
+          <select id="como">
+            <option value="pesquisa">termo de pesquisa</option>
+            <option value="perfil">username exato</option>
+          </select>
+        </div>
+        <div>
+          <label for="inicio">Começar do item</label>
+          <input type="number" id="inicio" min="1" value="1">
+        </div>
+      </div>
+    </div>
+
+    <div data-para="pesquisa lista" id="blocoN">
+      <label for="n">Perfis novos por pesquisa</label>
+      <input type="number" id="n" min="1" value="10">
+    </div>
+
+    <details>
+      <summary>Opções avançadas</summary>
+      <div class="cols">
+        <div>
+          <label for="rps">Requisições por segundo</label>
+          <input type="number" id="rps" min="0" step="0.1" value="1.5">
+        </div>
+        <div>
+          <label for="pausa">Pausa no bloqueio (min)</label>
+          <input type="number" id="pausa" min="0" step="1" value="5">
+        </div>
+      </div>
+      <p class="dica">O ritmo é do computador inteiro: as linhas dividem as mesmas vagas (o IP é um só).
+        Duas linhas a 1,5 somam 1,5 req/s, e não 3.</p>
+      <label for="subpasta">Subpasta dentro da pasta padrão (opcional)</label>
+      <input type="text" id="subpasta" placeholder="Ex.: busca_isabela — vazio = uma pasta por perfil/pesquisa">
+      <label class="check"><input type="checkbox" id="original"> Resolução original (bem maior que ~300 px)</label>
+      <label class="check"><input type="checkbox" id="forcar"> Baixar de novo perfis que já estão no registro</label>
+      <label class="check"><input type="checkbox" id="links"> Só gerar links.txt, sem baixar</label>
+      <label class="check"><input type="checkbox" id="limiteEspaco" checked>
+        <span>Parar quando o disco de destino ficar com menos de
+          <input type="number" id="espacoMinimo" min="0.1" step="0.5" value="2"> GB livres</span></label>
+      <p class="dica">Limite de segurança: vale para o disco onde a pasta está (C:, outro HD, pendrive…).
+        Ao chegar nele tudo para, o arquivo pela metade é apagado e o perfil é retomado na próxima vez.</p>
+    </details>
+
+    <div class="acoes">
+      <button class="primario" id="btnIniciar">▶ Iniciar</button>
+      <button id="btnPararDepois" hidden>Parar após o item atual</button>
+      <button class="perigo" id="btnParar" disabled>■ Parar agora</button>
+    </div>
+    <div class="msg" id="msg"></div>
+  </section>
+
+  <section class="card inteiro">
+    <div class="linha" style="justify-content: space-between; margin-bottom: 10px;">
+      <h2 style="margin: 0;">Andamento — <span class="nomeLinha"></span></h2>
+      <div class="linha">
+        <label class="check" style="margin: 0;"><input type="checkbox" id="rolar" checked> Rolar automaticamente</label>
+        <button id="btnLog" title="Erros que não pararam a execução, com todos os detalhes (de todas as linhas)">Abrir log de erros</button>
+        <button id="btnLimpar">Limpar tela</button>
+      </div>
+    </div>
+    <pre class="log" id="log"></pre>
+  </section>
+</template>
+
 <script>
 const TOKEN = "__TOKEN__";
+const N_LINHAS = Number("__LINHAS__") || 2;
 const $ = (id) => document.getElementById(id);
 const CAMPOS = ["alvoPerfil", "alvoPesquisa", "lista", "como", "inicio", "n", "rps", "pausa", "subpasta", "original", "forcar", "links",
                 "limiteEspaco", "espacoMinimo"];
-let modo = "pesquisa", pos = 0, rodando = false;
-
-// ---------- memória do formulário (só conveniência; funciona sem)
-function salvarForm() {
-  try {
-    const dados = { modo };
-    for (const c of CAMPOS) dados[c] = $(c).type === "checkbox" ? $(c).checked : $(c).value;
-    localStorage.setItem("painelVsco", JSON.stringify(dados));
-  } catch (e) {}
-}
-function carregarForm() {
-  try {
-    const dados = JSON.parse(localStorage.getItem("painelVsco") || "{}");
-    for (const c of CAMPOS) if (c in dados) $(c).type === "checkbox" ? ($(c).checked = dados[c]) : ($(c).value = dados[c]);
-    if (dados.modo) modo = dados.modo;
-  } catch (e) {}
-}
-
-// ---------- abas
-function mostrarModo() {
-  document.querySelectorAll("#abas button").forEach(b => b.classList.toggle("ativa", b.dataset.modo === modo));
-  document.querySelectorAll("[data-para]").forEach(el => {
-    let visivel = el.dataset.para.split(" ").includes(modo);
-    if (el.id === "blocoN" && modo === "lista") visivel = $("como").value === "pesquisa";
-    el.hidden = !visivel;
-  });
-}
-document.querySelectorAll("#abas button").forEach(b => b.onclick = () => { modo = b.dataset.modo; mostrarModo(); salvarForm(); });
+const L = {};  // L[n]: o que o navegador guarda de cada linha
+let atual = 1;  // linha mostrada
 
 // ---------- comunicação
 async function post(url, corpo) {
@@ -231,49 +222,128 @@ async function post(url, corpo) {
   if (!r.ok) throw new Error(j.erro || `HTTP ${r.status}`);
   return j;
 }
-function mensagem(texto, tipo) { $("msg").textContent = texto || ""; $("msg").className = tipo || ""; }
-async function acao(fn, okTexto) {
-  try { const r = await fn(); if (okTexto) mensagem(okTexto, "ok"); return r; }
-  catch (e) { mensagem(e.message, "erro"); }
+function mensagem(onde, texto, tipo) { onde.textContent = texto || ""; onde.className = "msg " + (tipo || ""); }
+async function acao(onde, fn, okTexto) {
+  try { const r = await fn(); if (okTexto) mensagem(onde, okTexto, "ok"); return r; }
+  catch (e) { mensagem(onde, e.message, "erro"); }
 }
 
-// ---------- pasta
-$("btnSalvarPasta").onclick = () => acao(async () => {
+// ---------- montagem das linhas
+function criarLinha(n) {
+  const frag = $("modeloLinha").content.cloneNode(true);
+  frag.querySelectorAll("[id]").forEach(el => el.id += "-" + n);
+  frag.querySelectorAll("label[for]").forEach(el => el.htmlFor += "-" + n);
+  frag.querySelectorAll(".nomeLinha").forEach(el => el.textContent = "Linha " + n);
+  const cartoes = [...frag.children];
+  $("grade").appendChild(frag);
+
+  const aba = document.createElement("button");
+  aba.innerHTML = `<span class="nome">Linha ${n}</span><span class="pilula" id="status-${n}">…</span><span class="alvo" id="alvoLinha-${n}">nada rodando</span>`;
+  aba.onclick = () => mostrarLinha(n);
+  $("linhas").appendChild(aba);
+
+  const c = (id) => $(id + "-" + n);
+  const linha = L[n] = { n, c, cartoes, aba, modo: "pesquisa", pos: 0, linhaAtual: null };
+
+  c("abas").querySelectorAll("button").forEach(b => b.onclick = () => { linha.modo = b.dataset.modo; mostrarModo(linha); salvarForm(linha); });
+  c("arquivoLista").onchange = () => acao(c("msg"), async () => {
+    if (!c("arquivoLista").value) return;
+    const r = await fetch("/api/lista?nome=" + encodeURIComponent(c("arquivoLista").value)).then(r => r.json());
+    c("lista").value = r.texto || ""; c("inicio").value = 1; contarLista(linha); salvarForm(linha);
+  });
+  c("lista").oninput = () => contarLista(linha);
+  c("como").onchange = () => mostrarModo(linha);
+  c("limiteEspaco").addEventListener("change", () => mostrarDisco(ultimoDisco));
+  c("espacoMinimo").addEventListener("input", () => mostrarDisco(ultimoDisco));
+  c("btnIniciar").onclick = () => acao(c("msg"), async () => {
+    const cfg = { linha: n, modo: linha.modo };
+    for (const id of CAMPOS) cfg[id] = c(id).type === "checkbox" ? c(id).checked : c(id).value;
+    cfg.alvo = linha.modo === "perfil" ? cfg.alvoPerfil : cfg.alvoPesquisa;
+    salvarForm(linha);
+    await post("/api/iniciar", cfg);
+    mensagem(c("msg"), "");
+    atualizar();
+  });
+  c("btnParar").onclick = () => acao(c("msg"), () => post("/api/parar", { linha: n, depois: false }));
+  c("btnPararDepois").onclick = () => acao(c("msg"), () => post("/api/parar", { linha: n, depois: true }));
+  c("btnLog").onclick = () => acao(c("msg"), () => post("/api/abrir-log"));
+  c("btnLimpar").onclick = () => { c("log").textContent = ""; linha.linhaAtual = null; };
+  cartoes.forEach(el => el.querySelectorAll("input, select, textarea").forEach(x => x.addEventListener("change", () => salvarForm(linha))));
+
+  carregarForm(linha); mostrarModo(linha); contarLista(linha);
+}
+
+function mostrarLinha(n) {
+  atual = n;
+  for (const linha of Object.values(L)) {
+    const ativa = linha.n === n;
+    linha.aba.classList.toggle("ativa", ativa);
+    linha.cartoes.forEach(el => el.hidden = !ativa);
+  }
+  const log = L[n].c("log");
+  if (L[n].c("rolar").checked) log.scrollTop = log.scrollHeight;
+  mostrarDisco(ultimoDisco);
+  try { localStorage.setItem("painelVscoLinha", String(n)); } catch (e) {}
+}
+
+// ---------- memória do formulário (só conveniência; funciona sem)
+function salvarForm(linha) {
+  try {
+    const dados = { modo: linha.modo };
+    for (const id of CAMPOS) dados[id] = linha.c(id).type === "checkbox" ? linha.c(id).checked : linha.c(id).value;
+    localStorage.setItem("painelVsco-" + linha.n, JSON.stringify(dados));
+  } catch (e) {}
+}
+function carregarForm(linha) {
+  try {
+    // a Linha 1 herda o que o painel de uma linha só tinha guardado
+    const salvo = localStorage.getItem("painelVsco-" + linha.n) || (linha.n === 1 ? localStorage.getItem("painelVsco") : null);
+    const dados = JSON.parse(salvo || "{}");
+    for (const id of CAMPOS) if (id in dados) linha.c(id).type === "checkbox" ? (linha.c(id).checked = dados[id]) : (linha.c(id).value = dados[id]);
+    if (dados.modo) linha.modo = dados.modo;
+  } catch (e) {}
+}
+
+// ---------- abas de modo (Um perfil / Pesquisa / Lista)
+function mostrarModo(linha) {
+  linha.c("abas").querySelectorAll("button").forEach(b => b.classList.toggle("ativa", b.dataset.modo === linha.modo));
+  linha.cartoes[0].querySelectorAll("[data-para]").forEach(el => {
+    let visivel = el.dataset.para.split(" ").includes(linha.modo);
+    if (el.id === "blocoN-" + linha.n && linha.modo === "lista") visivel = linha.c("como").value === "pesquisa";
+    el.hidden = !visivel;
+  });
+}
+
+// ---------- pasta (comum a todas as linhas)
+const msgPasta = $("msgPasta");
+$("btnSalvarPasta").onclick = () => acao(msgPasta, async () => {
   const r = await post("/api/pasta", { caminho: $("pasta").value });
-  $("pasta").value = ""; mensagem("Pasta salva: " + r.pasta, "ok"); atualizar();
+  $("pasta").value = ""; mensagem(msgPasta, "Pasta salva: " + r.pasta, "ok"); atualizar();
 });
 $("pasta").onkeydown = (e) => { if (e.key === "Enter") $("btnSalvarPasta").click(); };
-$("btnEscolher").onclick = () => acao(async () => {
-  mensagem("A janela de seleção abriu (pode estar atrás do navegador)…");
+$("btnEscolher").onclick = () => acao(msgPasta, async () => {
+  mensagem(msgPasta, "A janela de seleção abriu (pode estar atrás do navegador)…");
   const r = await post("/api/escolher-pasta");
-  mensagem(r.pasta ? "Pasta salva: " + r.pasta : "Nenhuma pasta escolhida.", r.pasta ? "ok" : "");
+  mensagem(msgPasta, r.pasta ? "Pasta salva: " + r.pasta : "Nenhuma pasta escolhida.", r.pasta ? "ok" : "");
   atualizar();
 });
-$("btnAbrir").onclick = () => acao(() => post("/api/abrir-pasta"));
-$("btnLog").onclick = () => acao(() => post("/api/abrir-log"));
+$("btnAbrir").onclick = () => acao(msgPasta, () => post("/api/abrir-pasta"));
 
 // ---------- listas
 async function carregarListas() {
   const r = await fetch("/api/listas").then(r => r.json()).catch(() => []);
-  const sel = $("arquivoLista");
-  for (const l of r) sel.add(new Option(`${l.nome} (${l.itens} itens)`, l.nome));
+  for (const linha of Object.values(L))
+    for (const l of r) linha.c("arquivoLista").add(new Option(`${l.nome} (${l.itens} itens)`, l.nome));
 }
-$("arquivoLista").onchange = () => acao(async () => {
-  if (!$("arquivoLista").value) return;
-  const r = await fetch("/api/lista?nome=" + encodeURIComponent($("arquivoLista").value)).then(r => r.json());
-  $("lista").value = r.texto || ""; $("inicio").value = 1; contarLista(); salvarForm();
-});
-function itensLista() { return $("lista").value.split(/\r?\n/).map(s => s.trim()).filter(s => s && !s.startsWith("#")); }
-function contarLista() { const n = itensLista().length; $("contaLista").textContent = n + (n === 1 ? " item" : " itens"); }
-$("lista").oninput = contarLista;
-$("como").onchange = mostrarModo;
+function itensLista(linha) { return linha.c("lista").value.split(/\r?\n/).map(s => s.trim()).filter(s => s && !s.startsWith("#")); }
+function contarLista(linha) { const n = itensLista(linha).length; linha.c("contaLista").textContent = n + (n === 1 ? " item" : " itens"); }
 
-// ---------- limite de espaço em disco
+// ---------- limite de espaço em disco (comparado com o da linha mostrada)
 const GB = 1024 ** 3;
 let ultimoDisco = null;
-function limiteBytes() {
-  const gb = parseFloat(String($("espacoMinimo").value).replace(",", "."));
-  return $("limiteEspaco").checked && gb > 0 ? gb * GB : 0;
+function limiteBytes(linha) {
+  const gb = parseFloat(String(linha.c("espacoMinimo").value).replace(",", "."));
+  return linha.c("limiteEspaco").checked && gb > 0 ? gb * GB : 0;
 }
 function textoGB(n) {  // arredonda para baixo, como o painel.py: 1,999 GB livres não aparece como 2 GB
   const casas = n < 100 * GB ? 2 : 1, f = 10 ** casas;
@@ -281,34 +351,16 @@ function textoGB(n) {  // arredonda para baixo, como o painel.py: 1,999 GB livre
 }
 function mostrarDisco(d) {
   ultimoDisco = d;
-  $("espacoMinimo").disabled = !$("limiteEspaco").checked;
+  for (const linha of Object.values(L)) linha.c("espacoMinimo").disabled = !linha.c("limiteEspaco").checked;
   if (!d) { $("disco").textContent = ""; $("espaco").textContent = "disco inacessível"; $("espaco").className = "baixo"; return; }
-  const limite = limiteBytes(), baixo = limite && d.livre < limite;
+  const limite = limiteBytes(L[atual]), baixo = limite && d.livre < limite;
   $("disco").textContent = `(${d.local})`;
   $("espaco").textContent = `${textoGB(d.livre)} de ${textoGB(d.total)}` + (baixo ? " — abaixo do limite" : "");
   $("espaco").className = baixo ? "baixo" : "";
-  $("espaco").title = limite ? `Os downloads param quando restarem ${textoGB(limite)} livres` : "Limite de espaço desligado";
+  $("espaco").title = limite ? `Os downloads da Linha ${atual} param quando restarem ${textoGB(limite)} livres` : "Limite de espaço desligado";
 }
-$("limiteEspaco").addEventListener("change", () => mostrarDisco(ultimoDisco));
-$("espacoMinimo").addEventListener("input", () => mostrarDisco(ultimoDisco));
-
-// ---------- iniciar / parar
-$("btnIniciar").onclick = () => acao(async () => {
-  const cfg = { modo };
-  for (const c of CAMPOS) cfg[c] = $(c).type === "checkbox" ? $(c).checked : $(c).value;
-  cfg.alvo = modo === "perfil" ? cfg.alvoPerfil : cfg.alvoPesquisa;
-  salvarForm();
-  await post("/api/iniciar", cfg);
-  mensagem("");
-  atualizar();
-});
-$("btnParar").onclick = () => acao(() => post("/api/parar", { depois: false }));
-$("btnPararDepois").onclick = () => acao(() => post("/api/parar", { depois: true }));
-document.querySelectorAll("input, select, textarea").forEach(el => el.addEventListener("change", salvarForm));
 
 // ---------- log
-const log = $("log");
-let linhaAtual = null;
 function classe(t) {
   if (/^(#####|=====)/.test(t)) return "t";
   if (/\*\*\*|BLOQUEADO|erro|Erro|falhou/.test(t)) return "e";
@@ -323,69 +375,80 @@ function novaLinha(t) {
   const c = classe(t); if (c) d.className = c;
   return d;
 }
-function anexar(dados) {
-  if (dados.desde !== pos) { log.textContent = ""; linhaAtual = null; }
-  if (linhaAtual) { linhaAtual.remove(); linhaAtual = null; }
+function anexar(linha, dados) {
+  const log = linha.c("log");
+  if (dados.desde !== linha.pos) { log.textContent = ""; linha.linhaAtual = null; }
+  if (linha.linhaAtual) { linha.linhaAtual.remove(); linha.linhaAtual = null; }
   const frag = document.createDocumentFragment();
   for (const t of dados.linhas) frag.appendChild(novaLinha(t));
   log.appendChild(frag);
-  if (dados.atual) { linhaAtual = novaLinha(dados.atual); log.appendChild(linhaAtual); }
+  if (dados.atual) { linha.linhaAtual = novaLinha(dados.atual); log.appendChild(linha.linhaAtual); }
   while (log.childElementCount > 4000) log.firstChild.remove();
-  pos = dados.fim;
+  linha.pos = dados.fim;
 }
-$("btnLimpar").onclick = () => { log.textContent = ""; linhaAtual = null; };
 
 // ---------- estado
 function qtdErros(n) { return n === 1 ? "1 item com erro" : `${n} itens com erro`; }
-function mostrarEstado(e) {
-  rodando = e.rodando;
-  const st = $("status");
+function textoEstado(e) {
   if (e.rodando) {
     const item = e.item && e.item.n > 1 ? ` — item ${e.item.i}/${e.item.n}` : "";
     const rodada = e.repetir ? ` — rodada ${e.rodada}` : "";
     const fase = e.parando ? "Parando" : e.espera !== null ? `Próxima rodada em ${e.espera} s` : "Baixando";
-    st.textContent = fase + rodada + item + (e.erros ? ` · ${qtdErros(e.erros)}` : "") + ` · ${e.decorrido}`;
-    st.className = "pilula rodando";
-  } else if (e.codigo === null || e.codigo === undefined) {
-    st.textContent = "Pronto"; st.className = "pilula";
-  } else if (e.codigo === 3 || e.codigo === 4 || e.codigo === 130) {
-    const parou = { 3: "Bloqueado pelo site", 4: "Parado: disco no limite de espaço", 130: "Parado" }[e.codigo];
-    st.textContent = parou + (e.erros ? ` · ${qtdErros(e.erros)} (ver log)` : "");
-    st.className = "pilula " + (e.codigo === 130 ? "" : "erro");
-  } else if (e.erros) {
-    st.textContent = `Terminou · ${qtdErros(e.erros)} (ver log de erros) · ${e.decorrido}`;
-    st.className = "pilula aviso";
-  } else if (e.codigo === 0) {
-    st.textContent = `Concluído · ${e.decorrido}`; st.className = "pilula ok";
-  } else {
-    st.textContent = `Terminou (código ${e.codigo})`; st.className = "pilula erro";
+    return [fase + rodada + item + (e.erros ? ` · ${qtdErros(e.erros)}` : "") + ` · ${e.decorrido}`, "rodando"];
   }
-  $("pastaAtual").textContent = e.pasta ? e.pasta : `(nenhuma definida — usando ${e.pasta_efetiva})`;
-  $("registro").textContent = e.registro.toLocaleString("pt-BR");
-  mostrarDisco(e.disco);
-  $("btnIniciar").disabled = e.rodando;
-  $("btnParar").disabled = !e.rodando;
-  $("btnPararDepois").hidden = !(e.rodando && (e.repetir || (e.item && e.item.n > 1)));
-  $("btnPararDepois").textContent = e.repetir && !(e.item && e.item.n > 1) ? "Parar após a rodada atual" : "Parar após o item atual";
-  $("btnPararDepois").disabled = !!e.parando;
+  if (e.codigo === null || e.codigo === undefined) return ["Pronto", ""];
+  if (e.codigo === 3 || e.codigo === 4 || e.codigo === 130) {
+    const parou = { 3: "Bloqueado pelo site", 4: "Parado: disco no limite de espaço", 130: "Parado" }[e.codigo];
+    return [parou + (e.erros ? ` · ${qtdErros(e.erros)} (ver log)` : ""), e.codigo === 130 ? "" : "erro"];
+  }
+  if (e.erros) return [`Terminou · ${qtdErros(e.erros)} (ver log de erros) · ${e.decorrido}`, "aviso"];
+  if (e.codigo === 0) return [`Concluído · ${e.decorrido}`, "ok"];
+  return [`Terminou (código ${e.codigo})`, "erro"];
+}
+function mostrarEstado(linha, e) {
+  const c = linha.c;
+  const [texto, tipo] = textoEstado(e);
+  c("status").textContent = texto; c("status").className = "pilula " + tipo;
+  c("alvoLinha").textContent = e.titulo || "nada rodando";
+  c("alvoLinha").title = e.titulo || "";
+  c("btnIniciar").disabled = e.rodando;
+  c("btnParar").disabled = !e.rodando;
+  c("btnPararDepois").hidden = !(e.rodando && (e.repetir || (e.item && e.item.n > 1)));
+  c("btnPararDepois").textContent = e.repetir && !(e.item && e.item.n > 1) ? "Parar após a rodada atual" : "Parar após o item atual";
+  c("btnPararDepois").disabled = !!e.parando;
 }
 let ocupado = false;
 async function atualizar() {
   if (ocupado) return;
   ocupado = true;
   try {
-    const e = await fetch(`/api/estado?desde=${pos}`).then(r => r.json());
-    const noFim = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-    anexar(e.log);
-    mostrarEstado(e);
-    if ($("rolar").checked && noFim) log.scrollTop = log.scrollHeight;
+    const linhas = Object.values(L);
+    const e = await fetch("/api/estado?desde=" + linhas.map(l => l.pos).join(",")).then(r => r.json());
+    for (const el of e.linhas) {
+      const linha = L[el.linha]; if (!linha) continue;
+      const log = linha.c("log");
+      const noFim = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+      anexar(linha, el.log);
+      mostrarEstado(linha, el);
+      if (linha.c("rolar").checked && noFim) log.scrollTop = log.scrollHeight;
+    }
+    const rodando = e.linhas.filter(el => el.rodando).length;
+    $("status").textContent = rodando ? `${rodando} de ${e.linhas.length} linhas rodando` : "Pronto";
+    $("status").className = "pilula" + (rodando ? " rodando" : "");
+    $("pastaAtual").textContent = e.pasta ? e.pasta : `(nenhuma definida — usando ${e.pasta_efetiva})`;
+    $("registro").textContent = e.registro.toLocaleString("pt-BR");
+    mostrarDisco(e.disco);
   } catch (err) {
     $("status").textContent = "Painel desconectado (a janela do painel foi fechada?)";
     $("status").className = "pilula erro";
   } finally { ocupado = false; }
 }
 
-carregarForm(); mostrarModo(); contarLista(); carregarListas(); atualizar();
+for (let n = 1; n <= N_LINHAS; n++) criarLinha(n);
+let inicial = 1;
+try { inicial = Number(localStorage.getItem("painelVscoLinha")) || 1; } catch (e) {}
+mostrarLinha(L[inicial] ? inicial : 1);
+carregarListas(); atualizar();
 setInterval(atualizar, 800);
 </script>
 </body>

@@ -23,13 +23,15 @@ Como o site funciona (e por que não precisamos rolar a página):
      é encerrado, o arquivo pela metade é apagado e o script sai com código 4.
 
 Cuidados com o firewall (Cloudflare) do VSCO:
-  - Ritmo global (--rps): TODAS as requisições (página, API, fotos), de todas as threads, passam por
-    um único limitador (RITMO). O padrão é 1,5 requisição por segundo; 0 = sem limite.
+  - Ritmo global (--rps): TODAS as requisições (página, API, fotos), de todas as threads e de todas
+    as linhas de execução do computador (as abas do painel, ou dois terminais), passam por um único
+    limitador (RITMO, ver coordenacao.py). O padrão é 1,5 requisição por segundo; 0 = sem limite.
   - Bloqueio: se vier a página "Sorry, you have been blocked" (ou um desafio/limite do Cloudflare),
-    tudo pausa na hora (o curl em andamento é encerrado) por --pausa-bloqueio minutos (padrão 5) e
-    então sai UMA requisição de teste. Se passar, foi uma recusa isolada e o download continua; se
-    for recusada de novo, tudo para (exceção Bloqueado, código de saída 3). Nada do perfil em
-    andamento entra no registro, e os arquivos já baixados são pulados na próxima execução.
+    tudo pausa na hora (o curl em andamento é encerrado), nesta e nas outras linhas, por
+    --pausa-bloqueio minutos (padrão 5) e então sai UMA requisição de teste. Se passar, foi uma
+    recusa isolada e o download continua; se for recusada de novo, tudo para em todas as linhas
+    (exceção Bloqueado, código de saída 3). Nada do perfil em andamento entra no registro, e os
+    arquivos já baixados são pulados na próxima execução.
   - Conexão reaproveitada: as fotos de um perfil são baixadas por UM processo curl, em série, na
     mesma conexão (keep-alive), em vez de um processo e uma conexão nova por foto.
 
@@ -59,6 +61,7 @@ import traceback
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
+import coordenacao
 import dependencias
 import espaco_disco
 import log_erros
@@ -115,20 +118,48 @@ def parar(motivo):
 
 
 def checar_parada():
+    if not _parada.is_set():
+        motivo = coordenacao.bloqueio_alheio()
+        if motivo:
+            parar(f"{motivo}\n    (confirmado por outra linha de execução; esta parou também, porque o IP é o mesmo)")
     if _parada.is_set():
         raise Bloqueado(_motivo_parada)
 
 
 def pausado():
-    return _pausado
+    return _pausado or coordenacao.pausa_alheia() is not None
+
+
+_avisos_pausa = set()  # pausas de outras linhas já avisadas na tela (início e fim)
 
 
 def aguardar_pausa():
-    """Se há uma pausa de bloqueio em andamento, espera ela terminar. Levanta Bloqueado se confirmou."""
-    with _estado:
-        while _pausado and not _parada.is_set():
-            _estado.wait(1)  # com prazo: no Windows um wait sem prazo não deixa o Ctrl+C passar
-    checar_parada()
+    """Se há uma pausa de bloqueio em andamento, desta ou de outra linha de execução, espera ela
+    terminar. Levanta Bloqueado se o bloqueio se confirmou."""
+    alheia = None
+    while True:
+        with _estado:
+            while _pausado and not _parada.is_set():
+                _estado.wait(1)  # com prazo: no Windows um wait sem prazo não deixa o Ctrl+C passar
+        checar_parada()
+        p = coordenacao.pausa_alheia()
+        if not p:
+            break
+        alheia = p
+        with _estado:
+            avisar = ("início", p["n"]) not in _avisos_pausa
+            _avisos_pausa.add(("início", p["n"]))
+        if avisar:
+            _log(f"\n!!! Outra linha de execução viu a página de bloqueio: esta também está pausada. Às "
+                 f"{datetime.fromtimestamp(p['ate']):%H:%M:%S} aquela faz UMA requisição de teste antes de decidir.")
+        _parada.wait(1)
+    if alheia:
+        checar_parada()  # a pausa da outra linha pode ter terminado num bloqueio confirmado
+        with _estado:
+            avisar = ("fim", alheia["n"]) not in _avisos_pausa
+            _avisos_pausa.add(("fim", alheia["n"]))
+        if avisar:
+            _log("    A pausa da outra linha terminou sem bloqueio confirmado. Retomando.")
 
 
 def _descrever_bloqueio(code, corpo):
@@ -172,11 +203,12 @@ def _sondar(url):
 
 def confirmar_bloqueio(motivo, url):
     """Uma recusa isolada acontece às vezes sem o site estar bloqueando de fato. Então, antes de
-    desistir: pausa TODAS as threads por `_pausa_min` minutos (o curl em andamento é encerrado) e faz
-    UMA requisição de teste na mesma URL. Se ela passar, retoma; se for recusada de novo, para tudo.
+    desistir: pausa TODAS as threads, e as outras linhas de execução, por `_pausa_min` minutos (o curl
+    em andamento é encerrado) e faz UMA requisição de teste na mesma URL. Se ela passar, retoma; se
+    for recusada de novo, para tudo (as outras linhas também, ver coordenacao.avisar_bloqueio).
 
-    Só a primeira thread que vê o bloqueio conduz a pausa; as outras esperam o resultado.
-    Sem pausa configurada (0) ou depois de MAX_PAUSAS pausas, o bloqueio encerra direto."""
+    Só a primeira thread (de todas as linhas) que vê o bloqueio conduz a pausa; as outras esperam o
+    resultado. Sem pausa configurada (0) ou depois de MAX_PAUSAS pausas, o bloqueio encerra direto."""
     global _pausado, _pausas_feitas, _negadas_seguidas
     with _estado:
         if _parada.is_set():
@@ -185,6 +217,8 @@ def confirmar_bloqueio(motivo, url):
             dono = False
         elif not _pausa_min or _pausas_feitas >= MAX_PAUSAS or not url:
             dono = None
+        elif not coordenacao.iniciar_pausa(_pausa_min):  # outra linha de execução já está conduzindo
+            dono = False
         else:
             dono, _pausado = True, True
             _pausas_feitas += 1
@@ -192,6 +226,7 @@ def confirmar_bloqueio(motivo, url):
         if _pausa_min and _pausas_feitas >= MAX_PAUSAS:
             motivo += f"\n    (limite de {MAX_PAUSAS} pausas por execução atingido)"
         parar(motivo)
+        coordenacao.avisar_bloqueio(motivo)
         raise Bloqueado(motivo)
     if not dono:
         aguardar_pausa()
@@ -212,9 +247,11 @@ def confirmar_bloqueio(motivo, url):
             detalhe = _descrever_bloqueio(code, corpo) if _eh_bloqueio(code, corpo) else f"HTTP {code}"
             motivo += f"\n    confirmado: o teste após {_pausa_min:g} min de pausa também foi recusado ({detalhe})"
             parar(motivo)
+            coordenacao.avisar_bloqueio(motivo)
             raise Bloqueado(motivo)
         _log(f"    Teste passou (HTTP {code}): foi uma recusa isolada. Retomando.")
     finally:
+        coordenacao.encerrar_pausa()
         with _estado:
             _pausado = False
             _negadas_seguidas = 0
@@ -233,41 +270,45 @@ def mensagem_bloqueio(ex):
 # ---------------------------------------------------------------- ritmo global
 
 class Ritmo:
-    """Limite global de requisições por segundo, compartilhado por todas as threads.
+    """Limite global de requisições por segundo, compartilhado por todas as threads e por todas as
+    linhas de execução do computador (as vagas ficam em coordenacao.py).
 
     Cada requisição reserva uma "vaga" de início; as vagas ficam espaçadas de 1/rps segundos.
     Um lote do curl reserva várias vagas seguidas de uma vez e o próprio curl as respeita com
-    --rate, então a soma de tudo (listagem + fotos) nunca passa de `rps`."""
+    --rate, então a soma de tudo (listagem + fotos, de todas as linhas) nunca passa de `rps`."""
 
     def __init__(self, rps=0):
         self.rps = rps
-        self._prox = 0.0
-        self._lock = threading.Lock()
 
     def reservar(self, n=1):
-        """Reserva n inícios de requisição consecutivos e espera até o primeiro.
-        Durante uma pausa de bloqueio, espera ela terminar antes de reservar."""
+        """Reserva n inícios de requisição consecutivos e espera até o primeiro. Devolve o fim da
+        reserva (para liberar). Durante uma pausa de bloqueio, espera ela terminar antes de reservar."""
         while True:
             aguardar_pausa()
             if not self.rps:
-                return
-            pausas = _pausas_feitas
-            with self._lock:
-                agora = time.monotonic()
-                inicio = max(agora, self._prox)
-                self._prox = inicio + n / self.rps
-            if inicio > agora:
-                _parada.wait(inicio - agora)
+                return None
+            pausas = (_pausas_feitas, coordenacao.pausas())
+            vaga = coordenacao.reservar(n / self.rps, teto=(PAGE_SIZE + 1) / self.rps)
+            if not vaga:  # outra linha está no meio de um lote grande: ela vai dividi-lo em instantes
+                _parada.wait(0.2)
+                continue
+            inicio, fim = vaga
+            if inicio > time.time():
+                _parada.wait(max(0, inicio - time.time()))
             aguardar_pausa()
-            if _pausas_feitas == pausas:
-                return
+            if (_pausas_feitas, coordenacao.pausas()) == pausas:
+                return fim
             # houve uma pausa enquanto esperava: a vaga ficou para trás, reserva outra
+
+    def liberar(self, fim):
+        """Devolve as vagas que sobraram de um lote interrompido (pausa, ou a vez da outra linha)."""
+        if self.rps and fim:
+            coordenacao.liberar(fim, 1 / self.rps)
 
     def contar(self):
         """Conta uma requisição feita por fora (a de teste da pausa): empurra a próxima vaga."""
         if self.rps:
-            with self._lock:
-                self._prox = max(self._prox, time.monotonic()) + 1 / self.rps
+            coordenacao.empurrar(1 / self.rps)
 
     def opcao_curl(self):
         """--rate do curl equivalente (ele só aceita inteiros por unidade de tempo)."""
@@ -473,12 +514,14 @@ def _checar_curl():
 def _baixar_fatia(fatia, outdir, progresso, motivos):
     """Baixa `fatia` [(entry, path)] com UM processo curl: em série, na mesma conexão, no ritmo do
     RITMO (vagas já reservadas por quem chama). O resultado de cada arquivo é lido ao vivo, então um
-    bloqueio (aqui ou em outra thread) mata o curl na hora. O espaço livre do disco também é conferido
-    a cada volta: abaixo do limite (espaco_disco), o curl é encerrado e sai SemEspaco.
+    bloqueio (aqui, em outra thread ou em outra linha) mata o curl na hora. O espaço livre do disco
+    também é conferido a cada volta: abaixo do limite (espaco_disco), o curl é encerrado e sai SemEspaco.
+    Um lote maior que PAGE_SIZE também é interrompido quando outra linha de execução pede vez.
 
     Devolve (retentar, repetir): `retentar` são falhas transitórias, para outra rodada com espera
     (o motivo de cada uma fica em `motivos[path]`, para o log de erros); `repetir` são os itens
-    interrompidos por uma pausa de bloqueio que não se confirmou, para baixar logo em seguida."""
+    interrompidos (pausa de bloqueio que não se confirmou, ou a vez da outra linha), para baixar
+    logo em seguida."""
     por_nome = {os.path.basename(path) + ".part": (entry, path) for entry, path in fatia}
     config = "".join(f'url = "{entry[1]}"\noutput = "{nome}"\n' for nome, (entry, _) in por_nome.items())
     status = os.path.join(outdir, STATUS_LOTE)
@@ -537,7 +580,12 @@ def _baixar_fatia(fatia, outdir, progresso, motivos):
                 espaco_disco.checar(outdir)
                 _parada.wait(0.2)
                 checar_parada()  # outra thread confirmou um bloqueio
-                if pausado():  # outra thread viu um bloqueio: encerra o curl e espera a pausa lá fora
+                if pausado():  # outra thread/linha viu um bloqueio: encerra o curl e espera a pausa lá fora
+                    interrompido = True
+                    break
+                if len(fatia) > PAGE_SIZE and coordenacao.outra_esperando():
+                    _log(f"\n  >>> Outra linha de execução pediu vez: o resto deste perfil sai em fatias de "
+                         f"{PAGE_SIZE}, alternando com ela.")
                     interrompido = True
                     break
         finally:
@@ -583,7 +631,8 @@ def download_all(entries, outdir, links_only=False, ceder_vez=None, contexto=Non
 
     ceder_vez: função opcional; enquanto devolver True, o lote é dividido em fatias de PAGE_SIZE
     fotos para que outra thread (ex.: a listagem do próximo perfil) consiga vagas no RITMO entre
-    uma fatia e outra. Sem ela, o perfil inteiro sai de um único processo curl.
+    uma fatia e outra. O mesmo vale enquanto houver outra linha de execução ativa. Sem nenhuma das
+    duas, o perfil inteiro sai de um único processo curl.
     contexto: campos para o log de erros (perfil, site_id...), onde vão as mídias que falharam.
     Levanta espaco_disco.SemEspaco se o disco de `outdir` chegar ao limite de segurança."""
     os.makedirs(outdir, exist_ok=True)
@@ -628,11 +677,16 @@ def download_all(entries, outdir, links_only=False, ceder_vez=None, contexto=Non
             _parada.wait(10 * rodada)
         pendentes, diretos = diretos, []
         while pendentes:
-            n = PAGE_SIZE if ceder_vez and ceder_vez() else len(pendentes)
+            dividir = (ceder_vez and ceder_vez()) or coordenacao.outras_linhas()
+            n = PAGE_SIZE if dividir else len(pendentes)
             fatia, pendentes = pendentes[:n], pendentes[n:]
             espaco_disco.checar(outdir)
-            RITMO.reservar(len(fatia))  # durante uma pausa de bloqueio, espera aqui
+            fim = RITMO.reservar(len(fatia))  # durante uma pausa de bloqueio, espera aqui
             retentar, repetir = _baixar_fatia(fatia, outdir, progresso, motivos)
+            if repetir:
+                RITMO.liberar(fim)  # o curl foi interrompido: as vagas que sobraram voltam
+                if coordenacao.outra_esperando():
+                    _parada.wait(0.5)  # a próxima vaga é da outra linha, que pediu primeiro
             diretos += retentar
             pendentes = repetir + pendentes
     for entry, path in diretos:
@@ -714,6 +768,10 @@ def main():
         log_erros.registrar(f"{titulo_erro_perfil(ex, 'erro ao abrir o perfil')}: {username}", ex=ex,
                             perfil=username, acao="perfil pulado (não entrou no registro)")
         sys.exit(f"Erro: {ex}\n  (registrado em {log_erros.ARQUIVO})")
+    # outra linha de execução baixando o mesmo perfil agora: pula (quando ela terminar, estará no registro)
+    if not coordenacao.reservar_perfil(site_id):
+        _log(f"Perfil {username} já está sendo baixado por outra linha de execução; pulado.")
+        return
     with RegistroPerfis(args.registro) as registro:
         if site_id in registro and not args.forcar:
             _log(f"Perfil {username} já está em {args.registro}; pulado (use --forcar para baixar de novo).")
@@ -730,12 +788,14 @@ def main():
         # só registra quando nada falhou: assim uma próxima execução ainda completa o que faltou
         if not args.links_only and not failed:
             registro.registrar(site_id, username, "baixado" if entries else "vazio", len(entries))
+        coordenacao.soltar_perfil(site_id)  # depois de registrar: a outra linha já o encontra no registro
     if failed:
         sys.exit(f"Concluído em {outdir}, mas {failed} mídia(s) falharam (detalhes em {log_erros.ARQUIVO}).")
     _log(f"Concluído em {outdir}")
 
 
 def cleanup():
+    coordenacao.sair()  # solta as vagas e os perfis desta linha (encerrada à força, eles expiram sozinhos)
     if os.path.exists(COOKIE_JAR):
         os.remove(COOKIE_JAR)
 
@@ -747,6 +807,7 @@ def rodar(main_fn):
     if hasattr(signal, "SIGBREAK"):  # Ctrl+Break (é o que o painel.py envia para parar) = Ctrl+C
         signal.signal(signal.SIGBREAK, signal.default_int_handler)
     try:
+        coordenacao.iniciar()  # esta é uma linha de execução: divide o ritmo e o bloqueio com as outras
         main_fn()
     except Bloqueado as ex:
         _log(mensagem_bloqueio(ex))

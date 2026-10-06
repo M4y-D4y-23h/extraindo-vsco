@@ -5,6 +5,10 @@ Formato do arquivo (texto, append-only, 1 perfil por linha, separado por TAB):
     site_id    username    data_utc    status    midias
 Linhas começando com '#' são comentários. Linhas repetidas são inofensivas.
 
+Duas linhas de execução (as abas do painel, ou dois terminais) usam o mesmo arquivo: cada consulta
+lê antes as linhas que a outra acrescentou (só o que é novo, a partir de onde parou), e cada
+gravação é feita sob a trava de coordenacao.exclusivo, para duas linhas nunca se misturarem.
+
 Por que não é só um set() de strings:
   O arquivo pode crescer para milhões de linhas. Um set de strings em Python gasta ~100 bytes
   por perfil; aqui cada perfil vira um hash de 64 bits guardado numa tabela hash compacta
@@ -17,6 +21,8 @@ import os
 import threading
 from array import array
 from datetime import datetime, timezone
+
+import coordenacao
 
 ARQUIVO_PADRAO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "perfis_acessados.txt")
 CABECALHO = "# site_id\tusername\tdata_utc\tstatus\tmidias\n"
@@ -74,29 +80,53 @@ class RegistroPerfis:
         self.caminho = caminho
         self._ids = _HashSet64()
         self._lock = threading.Lock()
-        if os.path.exists(caminho):
-            with open(caminho, encoding="utf-8", errors="replace") as f:
-                for linha in f:  # streaming: memória constante independente do tamanho do arquivo
-                    if linha.startswith("#"):
-                        continue
-                    site_id = linha.split("\t", 1)[0].strip()
-                    if site_id:
-                        self._ids.add(_hash64(site_id))
-        novo = not os.path.exists(caminho) or os.path.getsize(caminho) == 0
+        self._lido = 0  # bytes do arquivo já lidos (só linhas completas)
+        self._atualizar()
         self._f = open(caminho, "a", encoding="utf-8", newline="\n")
-        if novo:
-            self._f.write(CABECALHO)
+        with coordenacao.exclusivo():
+            if os.path.getsize(caminho) == 0:
+                self._f.write(CABECALHO)
+            elif not self._termina_com_quebra():
+                self._f.write("\n")  # editado no Bloco de Notas: a próxima linha não pode grudar na última
             self._f.flush()
+        self._atualizar()
+
+    def _termina_com_quebra(self):
+        with open(self.caminho, "rb") as f:
+            f.seek(-1, os.SEEK_END)
+            return f.read(1) == b"\n"
+
+    def _atualizar(self):
+        """Lê as linhas acrescentadas desde a última leitura (todas, na primeira vez), inclusive as
+        gravadas por outra linha de execução. Streaming: memória constante, qualquer tamanho."""
+        try:
+            if os.path.getsize(self.caminho) <= self._lido:
+                return
+            with open(self.caminho, "rb") as f:
+                f.seek(self._lido)
+                for linha in f:
+                    if not linha.endswith(b"\n"):
+                        break  # outra linha gravando neste instante: fica para a próxima leitura
+                    self._lido += len(linha)
+                    if linha.startswith(b"#"):
+                        continue
+                    site_id = linha.split(b"\t", 1)[0].strip()
+                    if site_id:
+                        self._ids.add(_hash64(site_id.decode("utf-8", "replace")))
+        except FileNotFoundError:
+            pass
 
     def __len__(self):
         return len(self._ids)
 
     def __contains__(self, site_id):
-        return _hash64(site_id) in self._ids
+        with self._lock:
+            self._atualizar()
+            return _hash64(site_id) in self._ids
 
     def registrar(self, site_id, username, status, midias=0):
         data = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with self._lock:
+        with self._lock, coordenacao.exclusivo():
             self._ids.add(_hash64(site_id))
             self._f.write(f"{site_id}\t{username}\t{data}\t{status}\t{midias}\n")
             self._f.flush()  # grava na hora: um Ctrl+C/queda não perde o que já foi baixado

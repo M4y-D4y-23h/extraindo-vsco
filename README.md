@@ -21,6 +21,9 @@ Principais características:
 - **Limite de segurança de espaço em disco** (`--espaco-minimo`, padrão 2 GB; liga/desliga nas *Opções
   avançadas* do painel): os downloads param antes de o disco de destino (C:, outro HD, pendrive, cartão)
   ficar sem espaço. Ver *Limite de espaço em disco*.
+- **Duas linhas de execução** (abas *Linha 1* e *Linha 2* do painel): cada aba roda o seu trabalho ao
+  mesmo tempo que a outra (ex.: a Linha 1 pesquisa "isabela" e a Linha 2 baixa uma lista de perfis),
+  dividindo o mesmo ritmo e parando juntas num bloqueio. Ver *Duas linhas de execução*.
 
 ---
 
@@ -82,6 +85,7 @@ Para só instalar/atualizar, sem abrir o painel: `python dependencias.py`.
 | `requirements.txt` | Bibliotecas Python do projeto, instaladas/atualizadas pelo `pip` (hoje nenhuma). |
 | `pasta_destino.py` | Mostra/define a pasta padrão onde os downloads são salvos (`pasta_destino.txt`). |
 | `espaco_disco.py` | Limite de segurança de espaço em disco (`--espaco-minimo`): confere o espaço livre do disco de destino e para tudo antes de ele encher. |
+| `coordenacao.py` | Coordena as linhas de execução (abas do painel ou terminais rodando ao mesmo tempo): ritmo dividido, pausa/bloqueio em conjunto, perfil em andamento. O estado fica em `%TEMP%\vsco_linhas`. |
 | `pasta_destino.txt` | Criado por `pasta_destino.py`. Uma linha com a pasta base (pode ser editado no Bloco de Notas). |
 | `perfis_acessados.txt` | Criado automaticamente na primeira execução. Histórico de perfis já processados. |
 | `vsco_sessao.txt` | Opcional, criado por você. Token da sua sessão logada, usado só na pesquisa (ver *Erro de autenticação na pesquisa*).
@@ -99,18 +103,24 @@ as dependências (ver *Requisitos*); o `python painel.py` abre direto. O navegad
 - **Onde salvar**: mostra/troca a pasta padrão (digitando ou pelo botão *Escolher pasta…*) e abre a
   pasta no Explorer. Trocar durante um download vale a partir do próximo perfil. Mostra também o
   **espaço livre** do disco dessa pasta (em vermelho quando está abaixo do limite de segurança).
-- **O que baixar**: abas *Um perfil*, *Pesquisa* e *Lista* (carrega um `.txt` da pasta do projeto, como
-  `variacoes_isabela.txt`, e roda um item por vez; dá para começar de um item específico).
+- **Linha 1 / Linha 2** (no topo): duas linhas de execução, cada uma com o seu formulário, os seus
+  botões e o seu andamento. O cartão de cada linha mostra o estado dela e o que está rodando
+  (ex.: `pesquisa "isabela"`). Clique numa linha para ver/controlar o que é dela.
+- **O que baixar** (de cada linha): abas *Um perfil*, *Pesquisa* e *Lista* (carrega um `.txt` da pasta
+  do projeto, como `variacoes_isabela.txt`, e roda um item por vez; dá para começar de um item específico).
   As *Opções avançadas* têm ritmo, pausa no bloqueio, subpasta, resolução original, `--forcar`, só links
   e o **limite de espaço em disco** (marcado por padrão, com o campo de GB ao lado).
-- **Iniciar / Parar agora / Parar após o item atual**, e o **andamento ao vivo** com a mesma saída dos scripts.
+- **Iniciar / Parar agora / Parar após o item atual** (de cada linha), e o **andamento ao vivo** com a
+  mesma saída dos scripts.
 
 Detalhes:
 
-- Deixe a janela preta do `Painel.bat` aberta; fechar ela encerra o painel (e o download em andamento).
-- Só roda uma execução por vez: duas ao mesmo tempo dobrariam o ritmo de requisições.
+- Deixe a janela preta do `Painel.bat` aberta; fechar ela encerra o painel (e os downloads em andamento).
+- Cada linha roda uma execução por vez; as duas linhas podem rodar ao mesmo tempo, sem dobrar o ritmo
+  de requisições (ver *Duas linhas de execução*). *Parar agora* numa linha não mexe na outra.
+- A pasta de destino (*Onde salvar*), o registro de perfis e o `erros.log` são os mesmos para as duas.
 - Numa lista, um bloqueio confirmado (código 3) ou o disco no limite de espaço (código 4) interrompe a
-  lista inteira e o painel diz de qual item retomar.
+  lista inteira e o painel diz de qual item retomar. Um bloqueio confirmado numa linha para a outra também.
 - Qualquer outro erro (código 1 etc.) **não para nada**: o painel mostra
   `*** <item>: terminou com erro (código 1), registrado em erros.log; o painel seguiu para o próximo item.`,
   conta o item como erro e segue para o próximo da fila. O botão **Abrir log de erros** abre o `erros.log`.
@@ -120,6 +130,48 @@ Detalhes:
 - O painel só aceita conexões do próprio computador. Se a porta 8765 estiver ocupada, ele usa a seguinte.
 
 Os comandos abaixo continuam funcionando do mesmo jeito para quem preferir o terminal.
+
+### Duas linhas de execução
+
+Cada aba (*Linha 1*, *Linha 2*) é um processo à parte, mas as duas saem do mesmo computador e do
+mesmo IP: para o Cloudflare do vsco.co elas são uma execução só. Por isso elas combinam entre si
+(`coordenacao.py`), da mesma forma que as threads de um script já combinavam:
+
+| O quê | Como fica com duas linhas |
+|---|---|
+| Ritmo (`--rps`) | **Um limite para o computador inteiro.** As duas dividem as mesmas vagas: com 1,5 nas duas, a soma é 1,5 req/s, e não 3. |
+| Vez | Enquanto as duas rodam, as fotos saem em fatias de 14 e as vagas se alternam. Se uma linha começa enquanto a outra está num perfil grande (um lote só), o lote é dividido na hora (`>>> Outra linha de execução pediu vez`). |
+| Pausa de bloqueio | Quando uma linha vê a página de bloqueio, **as duas** pausam. A que viu faz a requisição de teste; a outra espera o resultado. |
+| Bloqueio confirmado | As duas param com o código 3 (inclusive uma que estava só esperando a próxima rodada). |
+| Mesmo perfil nas duas | Nunca é baixado duas vezes ao mesmo tempo: a linha que chega depois mostra `<perfil> pulado: a outra linha de execução está baixando este perfil` e segue (não conta para o *Perfis novos*). Quando a outra termina, o perfil está no registro, que cada linha relê antes de consultar. |
+| Registro e `erros.log` | Os mesmos arquivos; cada gravação é feita sob uma trava, sem misturar as linhas. |
+
+**O que se ganha**: rodar dois trabalhos diferentes ao mesmo tempo (ex.: uma pesquisa repetindo sem
+parar numa linha e uma lista de perfis na outra), cada um com o seu andamento, e aproveitar as folgas
+de uma linha (listagem, espera entre rodadas) com os downloads da outra. **O que não se ganha**: o
+dobro de fotos por hora. Quem limita a velocidade é o ritmo que o site tolera vindo de um IP, não o
+computador. Para ir mais rápido, aumente o `--rps` (o mesmo valor nas duas linhas), sabendo que o risco
+de bloqueio aumenta igual.
+
+O estado da combinação fica num arquivo pequeno em `%TEMP%\vsco_linhas`. Se uma linha for encerrada à
+força, o que ela tinha reservado (vagas, perfil em andamento) volta a ficar livre em 20 s. Dois terminais
+rodando os scripts ao mesmo tempo combinam do mesmo jeito.
+
+**Consumo** (medido no Linux, com um servidor de teste no lugar do vsco.co e as duas linhas baixando a
+1,5 req/s; no Windows a ordem de grandeza é a mesma):
+
+| Processo | Memória (pico) | CPU |
+|---|---|---|
+| painel (`painel.py`) | ~23 MB | — |
+| cada linha: script Python | ~19–20 MB | — |
+| cada linha: `curl` | ~11 MB | — |
+| **total, painel + 2 linhas** | **~72 MB** | **< 1% de um núcleo** |
+| aba do navegador com o painel | ~3 MB de JavaScript no início; o andamento guarda no máximo 4.000 linhas por linha de execução | — |
+
+Ou seja, num computador modesto (ex.: Core i5-3470, 4 GB de RAM, vídeo integrado) as duas linhas cabem
+com folga: o que mais pesa é o próprio navegador. Deixe aberta só a aba do painel; o painel não usa a
+placa de vídeo além de desenhar a página. Disco e rede também ficam folgados: a 1,5 req/s com fotos de
+~25 KB são ~40 KB/s, o mesmo de uma linha só, porque o ritmo é dividido.
 
 ### Pasta de destino
 
@@ -332,8 +384,9 @@ recriado no próximo erro).
 
 ### Ritmo global (`--rps`)
 
-Todas as requisições passam por um único limitador, compartilhado entre as threads: página do perfil,
-API de listagem, pesquisa e fotos. As requisições começam espaçadas de `1/rps` segundos, então o tempo
+Todas as requisições passam por um único limitador, compartilhado entre as threads e entre as linhas
+de execução (as abas do painel, ou dois terminais rodando ao mesmo tempo): página do perfil, API de
+listagem, pesquisa e fotos. As requisições começam espaçadas de `1/rps` segundos, então o tempo
 é previsível. Cada perfil mostra a estimativa antes de baixar e o tempo restante durante o download:
 
 ```
@@ -357,14 +410,14 @@ Cada resposta é conferida. Se vier a página de bloqueio do Cloudflare (*"Sorry
 blocked"*, *"Attention Required!"*, desafio *"Just a moment..."* ou o limite *"You are being rate
 limited"*), ou 5 respostas 403/429 seguidas (rede de segurança se a página mudar):
 
-1. **Pausa**: todas as threads param na hora e o `curl` em andamento é encerrado. Nenhuma
-   requisição sai durante a pausa (`--pausa-bloqueio`, padrão 5 min).
+1. **Pausa**: todas as threads, das duas linhas de execução, param na hora e o `curl` em andamento é
+   encerrado. Nenhuma requisição sai durante a pausa (`--pausa-bloqueio`, padrão 5 min).
 2. **Teste**: ao fim da pausa sai **uma** requisição, para a mesma URL que foi recusada.
 3. **Decisão**:
    - se o teste passar, foi uma recusa isolada (acontece de vez em quando mesmo sem bloqueio de
      verdade): o download continua de onde parou, incluindo a foto recusada;
    - se o teste também for recusado, o bloqueio está confirmado: aparece a mensagem com o texto da
-     página, o *Ray ID* e a URL, e o script sai com código **3**.
+     página, o *Ray ID* e a URL, e o script sai com código **3** (a outra linha também para).
 
 São no máximo 3 pausas por execução; depois disso, o próximo bloqueio encerra direto (sem pausa),
 para uma execução noturna não ficar horas insistindo num site que bloqueia a toda hora. Com

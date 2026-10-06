@@ -4,25 +4,29 @@ Painel local para rodar os downloads sem digitar comandos.
   Dois cliques em Painel.bat   (ou: python painel.py)
 
 Abre http://127.0.0.1:8765 no navegador. O painel só aceita conexões do próprio computador.
-Por baixo ele roda os mesmos scripts (vsco_dl.py / vsco_search_dl.py), um de cada vez (dois ao
-mesmo tempo dobrariam o ritmo de requisições), e mostra a saída deles ao vivo.
+Por baixo ele roda os mesmos scripts (vsco_dl.py / vsco_search_dl.py) e mostra a saída deles ao vivo.
 
-  - Pasta de destino: a mesma de pasta_destino.py; trocar no painel vale na hora, inclusive para a
-    execução em andamento (a partir do próximo perfil).
+  - Linhas de execução: as abas Linha 1 e Linha 2 (N_LINHAS) rodam cada uma a sua execução, ao mesmo
+    tempo (ex.: a Linha 1 pesquisa "isabela" e a Linha 2 baixa uma lista de perfis). Cada linha tem o
+    seu formulário, os seus botões e o seu andamento; dentro de uma linha, um comando por vez.
+    As linhas dividem o MESMO ritmo de requisições (o IP é um só) e param juntas num bloqueio; um
+    perfil que uma linha está baixando é pulado pela outra (ver coordenacao.py).
+  - Pasta de destino: a mesma de pasta_destino.py, para as duas linhas; trocar no painel vale na
+    hora, inclusive para as execuções em andamento (a partir do próximo perfil).
   - Parar: envia Ctrl+Break ao script, que encerra como num Ctrl+C (o curl é interrompido, arquivos
     parciais são apagados e o resumo é impresso). Se não responder em 15 s, é encerrado à força.
   - Lista: roda um item por vez; um bloqueio confirmado (código 3) ou o disco no limite de espaço
     (código 4) interrompe a lista inteira. Qualquer outro erro não para nada: o item é contado como
-    erro e a lista segue para o próximo.
+    erro e a lista segue para o próximo. Um bloqueio confirmado numa linha para a outra também.
   - Pesquisa (e lista de pesquisas): ao terminar a rodada, espera INTERVALO_REPETICAO segundos e roda
     tudo de novo, indefinidamente. Só o bloqueio (código 3) e o disco no limite (código 4) encerram
     a repetição.
   - Espaço em disco (opções avançadas, ligado por padrão): os scripts param quando o disco da pasta de
     destino fica com menos GB livres que o limite (ver espaco_disco.py). Já abaixo do limite, o
     Iniciar recusa e diz o porquê. O espaço livre aparece no card "Onde salvar".
-  - Erros: os scripts gravam cada erro, com os detalhes, em erros.log (ver log_erros.py). Se um item
-    terminar com erro sem ter gravado nada lá (ex.: o script quebrou ao iniciar), o painel grava o
-    comando, o código de saída e as últimas linhas da saída.
+  - Erros: os scripts gravam cada erro, com os detalhes, em erros.log (ver log_erros.py), o mesmo
+    para as duas linhas. Se um item terminar com erro sem ter gravado nada lá (ex.: o script quebrou
+    ao iniciar), o painel grava o comando, o código de saída e as últimas linhas da saída.
 
 Opções: --porta N (padrão 8765), --sem-navegador
 """
@@ -58,6 +62,7 @@ SAIDA_INTERROMPIDO = 130  # Ctrl+C/Parar: não é erro
 INTERVALO_REPETICAO = 10  # segundos entre uma rodada de pesquisa e a próxima
 LINHAS_NO_LOG = 30  # linhas finais da saída que o painel grava no erros.log quando o script não gravou nada
 NAO_SAO_LISTAS = {"perfis_acessados.txt", "pasta_destino.txt", "vsco_sessao.txt", "requirements.txt"}
+N_LINHAS = 2  # abas do painel; cada uma roda a sua execução, ao mesmo tempo que as outras
 porta = PORTA_PADRAO
 
 
@@ -121,20 +126,20 @@ class Log:
         return linhas[-n:]
 
 
-LOG = Log()
-
-
 # ---------------------------------------------------------------- execução
 
 class Tarefa:
-    """Uma execução por vez: uma lista de comandos rodados em sequência."""
+    """Uma linha de execução (uma aba do painel): uma execução por vez, uma lista de comandos rodados
+    em sequência, com o seu próprio andamento (log)."""
 
-    def __init__(self):
+    def __init__(self, numero):
+        self.numero, self.log = numero, Log()
         self._lock = threading.Lock()
         self.thread = self.proc = None
         self.parar_agora = self.parar_depois = False
         self.titulo, self.item, self.inicio, self.fim, self.codigo = "", None, None, None, None
         self.repetir, self.rodada, self.proxima, self.erros = False, 0, None, 0
+        self.bloqueio_outra = False  # parada porque outra linha confirmou um bloqueio
         self._acordar = threading.Event()  # interrompe a espera entre rodadas quando pedem para parar
 
     @property
@@ -144,8 +149,8 @@ class Tarefa:
     def iniciar(self, titulo, comandos, repetir=False):
         with self._lock:
             if self.rodando:
-                raise ValueError("Já existe uma execução em andamento.")
-            self.parar_agora = self.parar_depois = False
+                raise ValueError(f"A Linha {self.numero} já está rodando: pare-a ou use a outra linha.")
+            self.parar_agora = self.parar_depois = self.bloqueio_outra = False
             self.titulo, self.item, self.codigo = titulo, None, None
             self.inicio, self.fim = time.time(), None
             self.repetir, self.rodada, self.proxima, self.erros = repetir, 0, None, 0
@@ -154,33 +159,36 @@ class Tarefa:
             self.thread.start()
 
     def _rodar(self, comandos):
-        LOG.linha(f"\n##### {self.titulo} — início {time.strftime('%d/%m %H:%M:%S')}")
+        self.log.linha(f"\n##### {self.titulo} — início {time.strftime('%d/%m %H:%M:%S')}")
         try:
             while True:
                 self.rodada += 1
                 if self.repetir:
-                    LOG.linha(f"\n##### Rodada {self.rodada} — {time.strftime('%d/%m %H:%M:%S')}")
+                    self.log.linha(f"\n##### Rodada {self.rodada} — {time.strftime('%d/%m %H:%M:%S')}")
                 parada = self._rodada(comandos)
                 if parada and self.repetir:
-                    LOG.linha(f"*** {PARAM_TUDO[parada]} (código {parada}): repetição encerrada.")
+                    self.log.linha(f"*** {PARAM_TUDO[parada]} (código {parada}): repetição encerrada.")
                 if parada or not self.repetir or self.parar_agora or self.parar_depois:
                     break
-                LOG.linha(f">>> Próxima rodada em {INTERVALO_REPETICAO} s.")
+                self.log.linha(f">>> Próxima rodada em {INTERVALO_REPETICAO} s.")
                 self.item, self.proxima = None, time.time() + INTERVALO_REPETICAO
                 self._acordar.wait(INTERVALO_REPETICAO)
                 self.proxima = None
                 if self.parar_agora or self.parar_depois:
-                    LOG.linha(">>> Parado a pedido antes da próxima rodada.")
+                    if not self.bloqueio_outra:
+                        self.log.linha(">>> Parado a pedido antes da próxima rodada.")
                     break
         except Exception as ex:
-            LOG.linha(f"*** Erro no painel: {ex}")
+            self.log.linha(f"*** Erro no painel: {ex}")
             log_erros.registrar("erro no painel", ex=ex, pilha=True, acao="execução encerrada",
-                                **{"execução": self.titulo})
+                                **{"execução": f"Linha {self.numero}: {self.titulo}"})
             self.codigo = -1
             self.erros += 1
         finally:
+            if self.bloqueio_outra:
+                self.codigo = SAIDA_BLOQUEIO
             self.proc, self.proxima, self.fim = None, None, time.time()
-            LOG.linha(f"##### Fim — {duracao(self.fim - self.inicio)}")
+            self.log.linha(f"##### Fim — {duracao(self.fim - self.inicio)}")
 
     def _rodada(self, comandos):
         """Roda a lista de comandos uma vez. Só o bloqueio (código 3) e o disco no limite (código 4)
@@ -189,18 +197,23 @@ class Tarefa:
         total = len(comandos)
         for i, (nome, argv) in enumerate(comandos, 1):
             if self.parar_agora or self.parar_depois:
-                LOG.linha(f">>> Parado a pedido antes de: {nome}")
+                if not self.bloqueio_outra:
+                    self.log.linha(f">>> Parado a pedido antes de: {nome}")
                 break
             self.item = {"i": i, "n": total, "nome": nome}
             prefixo = f"[{i}/{total}] " if total > 1 else ""
-            LOG.linha(f"\n===== {prefixo}{nome}")
-            log_antes, saida_antes = log_erros.tamanho(), LOG.posicao()
+            self.log.linha(f"\n===== {prefixo}{nome}")
+            log_antes, saida_antes = log_erros.tamanho(), self.log.posicao()
             self.codigo = self._executar(argv)
+            if self.bloqueio_outra and self.codigo == SAIDA_INTERROMPIDO:
+                self.codigo = SAIDA_BLOQUEIO  # foi o painel que parou: a outra linha confirmou um bloqueio
             if self.codigo in PARAM_TUDO:
+                if self.codigo == SAIDA_BLOQUEIO:
+                    parar_por_bloqueio(self)  # o IP é o mesmo: as outras linhas param também
                 if total > 1:
                     depois = " (depois de liberar espaço ou trocar a pasta)" if self.codigo == SAIDA_SEM_ESPACO else ""
-                    LOG.linha(f"*** {PARAM_TUDO[self.codigo]}: a lista foi interrompida. "
-                              f"Para retomar{depois}, comece do item {i}.")
+                    self.log.linha(f"*** {PARAM_TUDO[self.codigo]}: a lista foi interrompida. "
+                                   f"Para retomar{depois}, comece do item {i}.")
                 return self.codigo
             if self.parar_agora:
                 break
@@ -214,18 +227,19 @@ class Tarefa:
                     acao = f"o painel seguiu para a próxima rodada (em {INTERVALO_REPETICAO} s)"
                 else:
                     acao = "era o último item; a execução terminou"
-                if log_erros.tamanho() == log_antes:  # o script não gravou nada: grava o que o painel sabe
+                comando = log_erros.formatar_comando(argv[2:])
+                if not log_erros.registrou(log_antes, comando):  # o script não gravou nada: grava o que o painel sabe
                     log_erros.registrar(f"{nome} terminou com erro (código {self.codigo})", acao=acao,
-                                        comando=log_erros.formatar_comando(argv[2:]), **{
-                                            "execução": self.titulo,
+                                        comando=comando, **{
+                                            "execução": f"Linha {self.numero}: {self.titulo}",
                                             "item": f"{i} de {total}" if total > 1 else None,
                                             "rodada": self.rodada if self.repetir else None,
                                             "código de saída": self.codigo,
                                             f"saída (últimas {LINHAS_NO_LOG} linhas)":
-                                                "\n".join(LOG.ultimas(saida_antes, LINHAS_NO_LOG)),
+                                                "\n".join(self.log.ultimas(saida_antes, LINHAS_NO_LOG)),
                                         })
-                LOG.linha(f"*** {nome}: terminou com erro (código {self.codigo}), registrado em "
-                          f"{os.path.basename(log_erros.ARQUIVO)}; {acao}.")
+                self.log.linha(f"*** {nome}: terminou com erro (código {self.codigo}), registrado em "
+                               f"{os.path.basename(log_erros.ARQUIVO)}; {acao}.")
         return None
 
     def _executar(self, argv):
@@ -241,8 +255,8 @@ class Tarefa:
             dados = proc.stdout.read1(65536)
             if not dados:
                 break
-            LOG.escrever(dec.decode(dados))
-        LOG.escrever(dec.decode(b"", final=True))
+            self.log.escrever(dec.decode(dados))
+        self.log.escrever(dec.decode(b"", final=True))
         return proc.wait()
 
     def parar(self, depois=False):
@@ -251,7 +265,7 @@ class Tarefa:
         if depois:
             self.parar_depois = True
             self._acordar.set()
-            LOG.linha(">>> Vai parar quando o item atual terminar.")
+            self.log.linha(">>> Vai parar quando o item atual terminar.")
             return
         self.parar_agora = True
         self._acordar.set()
@@ -260,7 +274,7 @@ class Tarefa:
             threading.Thread(target=self._interromper, args=(proc,), daemon=True).start()
 
     def _interromper(self, proc):
-        LOG.linha(">>> Parando...")
+        self.log.linha(">>> Parando...")
         try:
             proc.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
         except OSError:
@@ -268,14 +282,40 @@ class Tarefa:
         try:
             proc.wait(15)
         except subprocess.TimeoutExpired:
-            LOG.linha(">>> Não respondeu em 15 s: encerrando à força.")
+            self.log.linha(">>> Não respondeu em 15 s: encerrando à força.")
             if os.name == "nt":  # /T leva junto o curl filho
                 subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
             else:
                 proc.kill()
 
 
-TAREFA = Tarefa()
+LINHAS = [Tarefa(n) for n in range(1, N_LINHAS + 1)]
+
+
+def linha(cfg):
+    """A linha (aba) pedida no formulário: {"linha": 1} = Linha 1."""
+    try:
+        return LINHAS[int(cfg.get("linha") or 1) - 1]
+    except (ValueError, IndexError):
+        raise ValueError("Linha de execução inválida.") from None
+
+
+def parar_por_bloqueio(origem):
+    """Bloqueio confirmado (código 3) numa linha: as outras param também, inclusive se estiverem só
+    esperando a próxima rodada. Os scripts já param sozinhos (coordenacao.py), mas uma linha entre dois
+    itens ou entre rodadas começaria um processo novo e voltaria a bater no site."""
+    for t in LINHAS:
+        if t is not origem and t.rodando and not t.bloqueio_outra and t.codigo != SAIDA_BLOQUEIO:
+            t.bloqueio_outra = True
+            t.log.linha(f"*** Bloqueio confirmado na Linha {origem.numero}: esta linha também parou "
+                        "(as duas usam o mesmo IP). Espere o bloqueio passar e inicie de novo.")
+            t.parar()
+
+
+def todas_linhas(texto):
+    """Mensagem que vale para todas as linhas (ex.: a pasta mudou)."""
+    for t in LINHAS:
+        t.log.linha(texto)
 
 
 def duracao(seg):
@@ -402,9 +442,9 @@ def disco():
     return {"local": u[0], "livre": u[1], "total": u[2]} if u else None
 
 
-def estado(desde):
-    t = TAREFA
+def estado_linha(t, desde):
     return {
+        "linha": t.numero,
         "rodando": t.rodando,
         "titulo": t.titulo,
         "item": t.item if t.rodando else None,
@@ -415,11 +455,19 @@ def estado(desde):
         "repetir": t.rodando and t.repetir,
         "rodada": t.rodada,
         "espera": max(0, round(t.proxima - time.time())) if t.rodando and t.proxima else None,
+        "log": t.log.ler(desde),
+    }
+
+
+def estado(desdes):
+    """Estado das linhas (desdes = posição do log que o navegador já tem, uma por linha) e o que é comum."""
+    desdes = list(desdes) + [0] * N_LINHAS
+    return {
+        "linhas": [estado_linha(t, d) for t, d in zip(LINHAS, desdes)],
         "pasta": pasta_destino.ler(),
         "pasta_efetiva": pasta_efetiva(),
         "disco": disco(),
         "registro": contar_registro(),
-        "log": LOG.ler(desde),
     }
 
 
@@ -474,9 +522,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             if url.path == "/":
                 with open(HTML, encoding="utf-8") as f:
-                    self._enviar(f.read().replace("__TOKEN__", TOKEN).encode(), "text/html; charset=utf-8")
+                    pagina = f.read().replace("__TOKEN__", TOKEN).replace("__LINHAS__", str(N_LINHAS))
+                self._enviar(pagina.encode(), "text/html; charset=utf-8")
             elif url.path == "/api/estado":
-                self._json(estado(int(q.get("desde", 0))))
+                self._json(estado(int(d) for d in q.get("desde", "0").split(",") if d.strip()))
             elif url.path == "/api/listas":
                 self._json(listas())
             elif url.path == "/api/lista":
@@ -497,13 +546,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not caminho:
                     raise ValueError("Informe uma pasta.")
                 pasta = pasta_destino.definir(caminho)
-                LOG.linha(f">>> Pasta padrão definida: {pasta}")
+                todas_linhas(f">>> Pasta padrão definida: {pasta}")
                 self._json({"pasta": pasta})
             elif self.path == "/api/escolher-pasta":
                 escolhida = escolher_pasta()
                 if escolhida:
                     escolhida = pasta_destino.definir(escolhida)
-                    LOG.linha(f">>> Pasta padrão definida: {escolhida}")
+                    todas_linhas(f">>> Pasta padrão definida: {escolhida}")
                 self._json({"pasta": escolhida})
             elif self.path == "/api/abrir-pasta":
                 pasta = pasta_efetiva()
@@ -516,11 +565,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 os.startfile(log_erros.ARQUIVO)
                 self._json({"ok": True})
             elif self.path == "/api/iniciar":
+                tarefa = linha(cfg)
                 titulo, comandos, repetir = montar(cfg)
-                TAREFA.iniciar(titulo, comandos, repetir)
+                tarefa.iniciar(titulo, comandos, repetir)
                 self._json({"ok": True})
             elif self.path == "/api/parar":
-                TAREFA.parar(depois=bool(cfg.get("depois")))
+                linha(cfg).parar(depois=bool(cfg.get("depois")))
                 self._json({"ok": True})
             else:
                 self._json({"erro": "não encontrado"}, 404)
@@ -551,10 +601,13 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if TAREFA.rodando:
-            print("Parando a execução em andamento...")
-            TAREFA.parar()
-            TAREFA.thread.join(20)
+        rodando = [t for t in LINHAS if t.rodando]
+        if rodando:
+            print("Parando as execuções em andamento...")
+            for t in rodando:
+                t.parar()
+            for t in rodando:
+                t.thread.join(20)
         servidor.server_close()
 
 
