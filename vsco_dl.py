@@ -15,9 +15,12 @@ Como o site funciona (e por que não precisamos rolar a página):
      w=300 -> 321x480). Por padrão usamos w=300 (~25 KB por foto).
   4. Cada perfil baixado é gravado em perfis_acessados.txt (ver registro_perfis.py); perfis que já
      estão lá são pulados nas próximas execuções.
-  5. Erros (perfil apagado/inexistente, HTTP 404, fotos que falharam, exceções) vão para erros.log
-     com todos os detalhes (ver log_erros.py) e saem com código 1; o painel e os laços seguem para o
-     próximo da fila. Só o bloqueio (código 3) e o disco cheio (código 4) param tudo.
+  5. Erros (fotos que falharam, erro ao listar, exceções) vão para erros.log com todos os detalhes
+     (ver log_erros.py) e saem com código 1; o painel e os laços seguem para o próximo da fila. Só o
+     bloqueio (código 3) e o disco cheio (código 4) param tudo.
+     Perfil apagado ou inexistente (HTTP 404/410) não é erro: é pulado e sai com código 0. O aviso vai
+     para o erros.log uma vez só, e o perfil (quando a API de mídias responde site_not_found) entra no
+     registro como "apagado", para não ser mais tentado.
   6. Limite de espaço em disco (--espaco-minimo, padrão 2 GB; ver espaco_disco.py): o espaço livre
      do disco da pasta de destino é conferido antes e durante os downloads; abaixo do limite, o curl
      é encerrado, o arquivo pela metade é apagado e o script sai com código 4.
@@ -374,6 +377,34 @@ def titulo_erro_perfil(ex, padrao):
     if isinstance(ex, LookupError):
         return "perfil não encontrado na página"
     return padrao
+
+
+def perfil_apagado(ex):
+    """O erro diz que o perfil foi apagado ou não existe (HTTP 404/410)? Isso não é falha da execução:
+    o perfil é pulado, vai para o erros.log uma vez só e a execução segue sem erro (código 0)."""
+    return getattr(ex, "code", None) in ("404", "410")
+
+
+def registrar_apagado(ex):
+    """Pode ir para o registro como "apagado" (e não ser mais tentado)? Só com a resposta site_not_found
+    da API de mídias: um 404 genérico (ex.: a API mudou de endereço) marcaria todos os perfis."""
+    return perfil_apagado(ex) and "site_not_found" in getattr(ex, "resposta", "")
+
+
+def pular_apagado(ex, username, site_id=None, registro=None, depois="", **campos):
+    """Perfil apagado ou inexistente: grava no registro como "apagado" (com `registro` e site_id, se
+    registrar_apagado), avisa no erros.log uma vez só e na tela. `depois` completa o "o que foi feito"."""
+    gravar = registro is not None and site_id and registrar_apagado(ex)
+    acao = (("perfil pulado e gravado no registro como apagado (não será tentado de novo)" if gravar
+             else "perfil pulado") + depois + ". Não conta como erro; este aviso não se repete no log")
+    novo = log_erros.registrar(f"{titulo_erro_perfil(ex, 'perfil apagado ou inexistente')}: {username}", ex=ex,
+                               uma_vez=True, **campos, perfil=username, site_id=site_id, acao=acao)
+    if gravar:
+        registro.registrar(site_id, username, "apagado")
+    # sem a palavra "erro": o painel pinta essas linhas de vermelho, e isto é só um aviso (amarelo, "pulado")
+    _log(f"\n  {username} pulado: perfil apagado ou inexistente (HTTP {ex.code})"
+         + ("; gravado no registro, não será tentado de novo" if gravar else "")
+         + (" (anotado no log, uma vez só)" if novo else " (já anotado no log antes)"))
 
 
 def fetch(url, headers=None, retries=3):
@@ -764,7 +795,10 @@ def main():
 
     try:
         site_id, token = load_profile(username)
-    except (LookupError, RuntimeError) as ex:  # ErroHTTP 404 = perfil apagado ou inexistente
+    except (LookupError, RuntimeError) as ex:
+        if perfil_apagado(ex):  # ErroHTTP 404: sem site_id não dá para gravar no registro; sai com 0
+            pular_apagado(ex, username)
+            return
         log_erros.registrar(f"{titulo_erro_perfil(ex, 'erro ao abrir o perfil')}: {username}", ex=ex,
                             perfil=username, acao="perfil pulado (não entrou no registro)")
         sys.exit(f"Erro: {ex}\n  (registrado em {log_erros.ARQUIVO})")
@@ -780,6 +814,10 @@ def main():
         try:
             entries = collect_entries(site_id, token, username, largura=None if args.original else LARGURA_MINIMA)
         except (RuntimeError, ValueError) as ex:  # ValueError = JSON inválido na resposta da API
+            if perfil_apagado(ex):  # HTTP 404 da API: vai para o registro (ver registrar_apagado); sai com 0
+                pular_apagado(ex, username, site_id, None if args.links_only else registro)
+                coordenacao.soltar_perfil(site_id)  # depois de registrar, como abaixo
+                return
             log_erros.registrar(f"{titulo_erro_perfil(ex, 'erro ao listar as mídias')}: {username}", ex=ex,
                                 perfil=username, site_id=site_id, acao="perfil pulado (não entrou no registro)")
             sys.exit(f"Erro ao listar as mídias: {ex}\n  (registrado em {log_erros.ARQUIVO})")

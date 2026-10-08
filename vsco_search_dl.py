@@ -25,8 +25,10 @@ Registro de perfis (perfis_acessados.txt, ver registro_perfis.py):
   - Antes de listar as mídias de um perfil, o script consulta o registro; se o site_id já está lá,
     o perfil é pulado sem nenhuma requisição extra e NÃO conta para o -n (a busca segue até achar
     N perfis novos).
-  - Perfis baixados sem falhas e perfis vazios entram no registro. Perfis com erro de rede ou com
-    alguma foto que falhou não entram, para serem tentados de novo na próxima execução.
+  - Perfis baixados sem falhas, perfis vazios e perfis apagados (a API de mídias responde HTTP 404
+    site_not_found, ex.: um perfil que a pesquisa ainda mostra mas já foi apagado) entram no registro.
+    Perfis com erro de rede ou com alguma foto que falhou não entram, para serem tentados de novo na
+    próxima execução.
   - Várias linhas de execução (as abas do painel, ou terminais) com pesquisas parecidas: um perfil
     que outra linha está baixando agora é pulado (não conta para o -n); quando ela terminar, ele
     estará no registro, que é relido a cada consulta (ver coordenacao.py).
@@ -46,9 +48,11 @@ Uso:
 
 Repetição: ao terminar uma rodada, espera --intervalo segundos (padrão 10) e roda de novo,
   indefinidamente. Só o bloqueio (código 3), o disco no limite (código 4) e o Ctrl+C encerram. Os
-  outros erros (perfil apagado ou com erro ao listar, foto que falhou, erro de autenticação, exceção)
-  vão para erros.log com todos os detalhes (ver log_erros.py): o perfil com erro é pulado e a
-  pesquisa segue para o próximo.
+  outros erros (perfil com erro ao listar, foto que falhou, erro de autenticação, exceção) vão para
+  erros.log com todos os detalhes (ver log_erros.py): o perfil com erro é pulado e a pesquisa segue
+  para o próximo.
+  Perfil apagado ou inexistente (HTTP 404/410) não é erro: é pulado, entra no registro (não é tentado
+  de novo nas próximas rodadas nem em outras pesquisas) e vai para o erros.log uma vez só.
   Com --uma-vez, uma rodada com erro sai com código 1.
 
 Pasta de destino: sem -o (ou com -o relativo) tudo vai para dentro da pasta definida com
@@ -72,7 +76,8 @@ import log_erros
 from pasta_destino import Destino
 from registro_perfis import ARQUIVO_PADRAO, RegistroPerfis
 from vsco_dl import (LARGURA_MINIMA, RITMO, Bloqueado, add_rede_args, collect_entries, download_all,
-                     aplicar_rede_args, fetch, load_profile, rodar, titulo_erro_perfil)
+                     aplicar_rede_args, fetch, load_profile, perfil_apagado, pular_apagado, rodar,
+                     titulo_erro_perfil)
 
 SEARCH_API = "https://vsco.co/api/2.0/search/grids"
 SEARCH_PAGE = "https://vsco.co/search/people/"
@@ -268,6 +273,9 @@ def listar_perfis(args, registro, token, largura, fila, listando, encerrar):
             except Bloqueado:
                 raise
             except Exception as ex:
+                if perfil_apagado(ex):  # quem solta é o consumidor, depois de gravar no registro
+                    fila.put(("apagado", username, site_id, ex))
+                    continue
                 coordenacao.soltar_perfil(site_id)
                 fila.put(("erro", username, site_id, ex))
                 continue
@@ -294,7 +302,8 @@ def listar_perfis(args, registro, token, largura, fila, listando, encerrar):
 
 
 def pesquisar(args, registro):
-    """Uma rodada. Devolve False se algum perfil deu erro ao listar ou teve foto que falhou."""
+    """Uma rodada. Devolve False se algum perfil deu erro ao listar ou teve foto que falhou (perfil
+    apagado ou inexistente não é erro: é pulado, ver vsco_dl.pular_apagado)."""
     largura = None if args.original else LARGURA_MINIMA
     # relida antes de cada perfil: pasta_destino.py pode trocar a pasta durante a execução
     destino = Destino(args.out or f"busca_{args.termo}")
@@ -310,7 +319,7 @@ def pesquisar(args, registro):
     threading.Thread(target=listar_perfis, args=(args, registro, token, largura, fila, listando, encerrar),
                      daemon=True).start()
 
-    done, empty, errors, known, outra = [], [], [], 0, []
+    done, empty, errors, known, outra, apagados = [], [], [], 0, [], []
     try:
         while True:
             try:
@@ -337,6 +346,12 @@ def pesquisar(args, registro):
                                     pesquisa=args.termo, perfil=username, site_id=site_id,
                                     acao="perfil pulado (não entrou no registro); a pesquisa seguiu para o próximo")
                 errors.append(username)
+            elif tipo == "apagado":
+                _, username, site_id, ex = evento
+                pular_apagado(ex, username, site_id, None if args.links_only else registro,
+                              depois="; a pesquisa seguiu para o próximo", pesquisa=args.termo)
+                apagados.append(username)
+                coordenacao.soltar_perfil(site_id)
             elif tipo == "vazio":
                 _, username, site_id = evento
                 print(f"\n  {username} pulado: perfil sem mídia", file=sys.stderr)
@@ -365,6 +380,8 @@ def pesquisar(args, registro):
             print(f"  {username:<30} {total:>5} mídias  ok={ok} pulados={skipped} falhas={failed}", file=sys.stderr)
         print(f"  perfis já no registro pulados: {known}", file=sys.stderr)
         print(f"  perfis vazios pulados: {len(empty)} {empty}", file=sys.stderr)
+        if apagados:
+            print(f"  perfis apagados ou inexistentes pulados: {len(apagados)} {apagados}", file=sys.stderr)
         if outra:
             print(f"  perfis pulados por estarem com outra linha de execução: {len(outra)} {outra}", file=sys.stderr)
         if errors:

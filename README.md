@@ -15,9 +15,10 @@ Principais características:
 - **Retomada**: arquivos que já existem na pasta não são baixados de novo.
 - **Pasta de destino padrão e trocável em execução** (`pasta_destino.py`): define onde tudo é salvo;
   o arquivo é relido antes de cada perfil, então dá para mudar a pasta com o script rodando.
-- **Erros não param a fila** (`erros.log`): perfil apagado/inexistente, foto que falhou etc. são
-  gravados com todos os detalhes no log de erros e a execução segue para o próximo. Só o bloqueio do
-  Cloudflare (código 3) e o disco no limite de espaço (código 4) param tudo.
+- **Erros não param a fila** (`erros.log`): foto que falhou, erro ao listar etc. são gravados com
+  todos os detalhes no log de erros e a execução segue para o próximo. Só o bloqueio do Cloudflare
+  (código 3) e o disco no limite de espaço (código 4) param tudo. Perfil apagado/inexistente (HTTP 404)
+  nem conta como erro: é pulado, entra no registro e aparece no log uma vez só.
 - **Limite de segurança de espaço em disco** (`--espaco-minimo`, padrão 2 GB; liga/desliga nas *Opções
   avançadas* do painel): os downloads param antes de o disco de destino (C:, outro HD, pendrive, cartão)
   ficar sem espaço. Ver *Limite de espaço em disco*.
@@ -297,9 +298,14 @@ python vsco_search_dl.py isabela --uma-vez            # roda uma vez só, sem re
 
 **Repetição automática**: ao terminar uma rodada, o script espera `--intervalo` segundos (padrão 10)
 e roda a pesquisa de novo, com os mesmos valores, indefinidamente. Só o bloqueio (código 3), o disco
-no limite de espaço (código 4) e o `Ctrl+C` encerram. Os outros erros (perfil apagado ou com erro ao listar, foto que falhou, erro de
+no limite de espaço (código 4) e o `Ctrl+C` encerram. Os outros erros (perfil com erro ao listar, foto que falhou, erro de
 autenticação, qualquer exceção) vão para o `erros.log`: o perfil com erro é pulado, a pesquisa segue
 para o próximo e a repetição continua. Com `--uma-vez`, uma rodada com erro sai com código 1.
+
+**Perfil apagado ou inexistente** (a pesquisa ainda mostra o perfil, mas a API responde HTTP 404
+`site_not_found`): não é erro. O perfil é pulado e gravado no registro como `apagado`, então não é
+tentado de novo nas próximas rodadas nem em outras pesquisas; o aviso vai para o `erros.log` uma vez
+só, e a rodada termina sem erro (código 0).
 
 ### Erro de autenticação na pesquisa
 
@@ -336,8 +342,8 @@ Cada linha de `variacoes_isabela.txt` pode ser usada como termo de pesquisa ou c
 Graças ao registro, perfis que aparecem em mais de uma pesquisa só são baixados uma vez.
 O `if ($LASTEXITCODE -in 3, 4) { break }` encerra o laço inteiro quando vier um bloqueio (3) ou o
 disco chegar ao limite de espaço (4), em vez de seguir para a próxima variação e continuar batendo no
-site (ou enchendo o disco). Qualquer outro código (ex.: 1, perfil
-apagado) segue para a próxima variação, e o erro fica no `erros.log`.
+site (ou enchendo o disco). Qualquer outro código (ex.: 1, foto que
+falhou) segue para a próxima variação, e o erro fica no `erros.log`.
 
 ```powershell
 # como termo de pesquisa (5 perfis novos por variação)
@@ -346,7 +352,7 @@ foreach ($v in Get-Content variacoes_isabela.txt) {
     if ($LASTEXITCODE -in 3, 4) { break }
 }
 
-# como username exato (variações que não existem são reportadas e puladas)
+# como username exato (variações que não existem são reportadas e puladas, com código 0)
 foreach ($v in Get-Content variacoes_isabela.txt) {
     python vsco_dl.py $v -o "perfis/$v"
     if ($LASTEXITCODE -in 3, 4) { break }
@@ -374,8 +380,8 @@ foreach ($v in Get-Content variacoes_isabela.txt) {
 
 | Código | Significado |
 |---|---|
-| 0 | Terminou sem erro (inclui perfil já no registro, que só é pulado) |
-| 1 | Erro, gravado no `erros.log`: perfil apagado ou inexistente (HTTP 404), erro ao listar, mídia que falhou, curl ausente, pesquisa exigindo login, exceção inesperada etc. **Não para** o painel, a repetição nem os laços `foreach`: a execução segue para o próximo |
+| 0 | Terminou sem erro (inclui perfil já no registro e perfil apagado ou inexistente, HTTP 404, que só são pulados) |
+| 1 | Erro, gravado no `erros.log`: erro ao listar, mídia que falhou, curl ausente, pesquisa exigindo login, exceção inesperada etc. **Não para** o painel, a repetição nem os laços `foreach`: a execução segue para o próximo |
 | 3 | **Bloqueado pelo Cloudflare** (confirmado pela requisição de teste): tudo foi interrompido; rode de novo mais tarde. Para a fila |
 | 4 | **Disco no limite de espaço** (`--espaco-minimo`): tudo foi interrompido antes de o disco encher; libere espaço ou troque a pasta e rode de novo. Para a fila |
 
@@ -404,9 +410,12 @@ Exemplo, um perfil que foi apagado:
     url:             https://vsco.co/vdvdvdvdvdvdgdgg/gallery
     http:            404
     resposta:        página: ...
-    o que foi feito: perfil pulado (não entrou no registro)
+    o que foi feito: perfil pulado. Não conta como erro; este aviso não se repete no log
     comando:         vsco_dl.py --rps 1.5 --pausa-bloqueio 5 -- vdvdvdvdvdvdgdgg
 ```
+
+Um perfil apagado ou inexistente entra **uma vez só**: se o log já tem um bloco com o mesmo título
+(`perfil apagado ou inexistente (HTTP 404): <username>`), ele não é gravado de novo.
 
 O bloqueio do Cloudflare (código 3) e o disco no limite de espaço (código 4) não entram no log: eles
 param tudo e a mensagem fica na tela. O arquivo só cresce; pode ser apagado a qualquer momento (é
@@ -551,7 +560,8 @@ Arquivo texto, *append-only*, uma linha por perfil, separado por TAB:
   até encontrar N perfis novos.
 - **O que entra no registro**:
   - `baixado` — perfil com todas as fotos baixadas sem falha;
-  - `vazio` — perfil sem nenhuma mídia.
+  - `vazio` — perfil sem nenhuma mídia;
+  - `apagado` — perfil apagado ou inexistente (a API de mídias respondeu HTTP 404 `site_not_found`).
 - **O que não entra**: perfis com erro de rede ou com alguma foto que falhou (para serem tentados de
   novo na próxima execução) e execuções com `--links-only`.
 - Cada linha é gravada e salva em disco na hora (`flush`), então interromper com Ctrl+C não perde o

@@ -8,6 +8,9 @@ e o comando que estava rodando. Erros inesperados levam também o traceback do P
 Esses erros não param mais a execução: o perfil é pulado e o painel/pesquisa segue para o próximo
 da fila. A exceção é o bloqueio do Cloudflare (código 3), que para tudo e não entra aqui.
 
+Perfil apagado ou inexistente (HTTP 404/410) entra uma vez só (registrar com uma_vez=True): se o log
+já tem um bloco com o mesmo título, nada é gravado de novo.
+
 Exemplo:
 
 [2026-10-04 03:12:08 -0300] perfil apagado ou inexistente (HTTP 404): vdvdvdvdvdvdgdgg
@@ -16,7 +19,7 @@ Exemplo:
     url:             https://vsco.co/vdvdvdvdvdvdgdgg/gallery
     http:            404
     resposta:        página: ...
-    o que foi feito: perfil pulado (não entrou no registro)
+    o que foi feito: perfil pulado. Não conta como erro; este aviso não se repete no log
     comando:         vsco_dl.py --rps 1.5 --pausa-bloqueio 5 -- vdvdvdvdvdvdgdgg
 
 Cada bloco é gravado de uma vez e salvo na hora, sob a trava de coordenacao.exclusivo: todas as
@@ -72,15 +75,28 @@ def registrou(desde, comando):
     return comando.encode("utf-8") in novo
 
 
-def registrar(titulo, *, ex=None, acao=None, pilha=False, comando=None, **campos):
-    """Acrescenta um erro ao log.
+def _tem_titulo(titulo):
+    """Algum bloco do log já tem este título? Lido linha a linha: serve para qualquer tamanho de arquivo.
+    (Só a linha do título começa com "["; os campos vêm recuados. No Windows as linhas terminam em \\r\\n.)"""
+    fim = f"] {titulo}".encode("utf-8")
+    try:
+        with open(ARQUIVO, "rb") as f:
+            return any(l.startswith(b"[") and l.rstrip(b"\r\n").endswith(fim) for l in f)
+    except FileNotFoundError:
+        return False
+
+
+def registrar(titulo, *, ex=None, acao=None, pilha=False, comando=None, uma_vez=False, **campos):
+    """Acrescenta um erro ao log. Devolve False se não gravou porque `uma_vez` e ele já estava lá.
 
     campos: informações do erro (perfil, site_id, url...), na ordem dada; None/"" são omitidos.
     ex: a exceção: tipo e mensagem e, se ela tiver campos_log() (ver vsco_dl.ErroHTTP), o código
         HTTP, a URL, a saída do curl e um trecho da resposta.
     acao: o que a execução fez depois do erro.
     pilha: inclui o traceback (para erros inesperados).
-    comando: a linha de comando que falhou (padrão: a deste processo)."""
+    comando: a linha de comando que falhou (padrão: a deste processo).
+    uma_vez: não grava se o log já tem um bloco com este mesmo título (ex.: o perfil apagado, que a
+        pesquisa encontra de novo a cada rodada e em outras pesquisas): o aviso aparece uma vez só."""
     if ex is not None:
         campos["erro"] = f"{type(ex).__name__}: {ex}"
         if hasattr(ex, "campos_log"):
@@ -98,7 +114,11 @@ def registrar(titulo, *, ex=None, acao=None, pilha=False, comando=None, **campos
         linhas.extend(" " * (largura + 5) + l for l in resto)
     bloco = "\n".join(linhas) + "\n\n"
     try:
-        with _lock, coordenacao.exclusivo(), open(ARQUIVO, "a", encoding="utf-8") as f:
-            f.write(bloco)
+        with _lock, coordenacao.exclusivo():  # a consulta e a gravação juntas: duas linhas não gravam o mesmo aviso
+            if uma_vez and _tem_titulo(titulo):
+                return False
+            with open(ARQUIVO, "a", encoding="utf-8") as f:
+                f.write(bloco)
     except OSError as erro:
         print(f"  aviso: não consegui gravar em {ARQUIVO} ({erro})", file=sys.stderr)
+    return True
