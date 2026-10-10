@@ -24,6 +24,10 @@ Como o site funciona (e por que não precisamos rolar a página):
   6. Limite de espaço em disco (--espaco-minimo, padrão 2 GB; ver espaco_disco.py): o espaço livre
      do disco da pasta de destino é conferido antes e durante os downloads; abaixo do limite, o curl
      é encerrado, o arquivo pela metade é apagado e o script sai com código 4.
+  7. Pasta sincronizada (Google Drive, OneDrive, Dropbox) ou antivírus: cada foto baixa como .part e é
+     renomeada no fim. Se outro programa estiver com o arquivo aberto, renomear/apagar é tentado de novo
+     por até ~5 s (_em_uso); se continuar em uso, só aquela foto vai para a próxima rodada de tentativas
+     (e, falhando nas 3, para o erros.log). A execução nunca para por isso.
 
 Cuidados com o firewall (Cloudflare) do VSCO:
   - Ritmo global (--rps): TODAS as requisições (página, API, fotos), de todas as threads e de todas
@@ -527,11 +531,42 @@ def media_path(entry, outdir):
     return os.path.join(outdir, f"{date}_{mid}{ext}")
 
 
+def _em_uso(op, *args):
+    """op(*args) (renomear/apagar um arquivo), tentando de novo por até ~5 s enquanto o Windows disser
+    que o arquivo está em uso: numa pasta sincronizada (Google Drive, OneDrive, Dropbox) o programa de
+    sincronização abre cada arquivo novo para subir, e um antivírus faz o mesmo. Se continuar em uso,
+    levanta o PermissionError."""
+    for tentativa in range(25):
+        try:
+            return op(*args)
+        except PermissionError:
+            if tentativa == 24:
+                raise
+            time.sleep(0.2)
+
+
+def _apagar(caminho):
+    """Apaga o arquivo, se existir. Nunca levanta por arquivo em uso: devolve False e ele fica na pasta
+    (um .part que sobra é sobrescrito no próximo download)."""
+    try:
+        _em_uso(os.remove, caminho)
+    except FileNotFoundError:
+        pass
+    except PermissionError:
+        return False
+    return True
+
+
 def _finalizar(entry, tmp, path):
-    os.replace(tmp, path)
+    """Renomeia o .part pronto para o nome final e põe a data da foto no arquivo. Levanta
+    PermissionError se o .part continuar em uso por outro programa (ver _em_uso)."""
+    _em_uso(os.replace, tmp, path)
     ts = entry[3]
     if ts:
-        os.utime(path, (ts / 1000, ts / 1000))
+        try:
+            _em_uso(os.utime, path, (ts / 1000, ts / 1000))
+        except PermissionError:
+            pass  # a foto já está salva; só a data do arquivo fica a do download
 
 
 def _checar_curl():
@@ -556,12 +591,13 @@ def _baixar_fatia(fatia, outdir, progresso, motivos):
     por_nome = {os.path.basename(path) + ".part": (entry, path) for entry, path in fatia}
     config = "".join(f'url = "{entry[1]}"\noutput = "{nome}"\n' for nome, (entry, _) in por_nome.items())
     status = os.path.join(outdir, STATUS_LOTE)
-    if os.path.exists(status):
-        os.remove(status)
+    inicio = 0
+    if not _apagar(status):  # sobrou de um lote anterior e continua em uso: lê só o que este lote acrescentar
+        inicio = os.path.getsize(status)
     # %output{>>arq} grava e fecha o arquivo a cada transferência (stdout/stderr em pipe só chegam no fim)
     cmd = [CURL, "-sS", "-L", "--max-time", "120", "-A", UA, *RITMO.opcao_curl(), "-K", "-",
            "-w", f"%output{{>>{STATUS_LOTE}}}%{{filename_effective}}\t%{{http_code}}\t%{{exitcode}}\n"]
-    retentar, repetir, lido, resto, interrompido = [], [], 0, b"", False
+    retentar, repetir, lido, resto, interrompido = [], [], inicio, b"", False
     with tempfile.TemporaryFile() as erros:  # arquivo, não pipe: um pipe cheio travaria o curl
         proc = subprocess.Popen(cmd, cwd=outdir, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=erros)
         try:
@@ -581,14 +617,20 @@ def _baixar_fatia(fatia, outdir, progresso, motivos):
                         tmp = os.path.join(outdir, nome)
                         if code == "200" and exitcode == "0":
                             checar_resposta(code)
-                            _finalizar(entry, tmp, path)
+                            try:
+                                _finalizar(entry, tmp, path)
+                            except PermissionError as ex:  # .part preso por outro programa: só esta foto
+                                _apagar(tmp)                # volta para a próxima rodada
+                                motivos[path] = f"baixou, mas não deu para renomear o .part ({ex})"
+                                retentar.append((entry, path))
+                                continue
                             progresso("ok")
                             continue
                         corpo = b""
                         if os.path.exists(tmp):
                             with open(tmp, "rb") as f:
                                 corpo = f.read(256 * 1024)
-                            os.remove(tmp)
+                            _apagar(tmp)
                         negada = code in ("403", "429")
                         if negada:  # possível bloqueio: nenhuma requisição a mais antes de decidir
                             proc.kill()
@@ -624,12 +666,9 @@ def _baixar_fatia(fatia, outdir, progresso, motivos):
                 proc.kill()
                 proc.wait()
             for nome in por_nome:  # o que estava em andamento quando o curl foi interrompido
-                tmp = os.path.join(outdir, nome)
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            if os.path.exists(status):
-                os.remove(status)
-        if proc.returncode and not lido and not interrompido:
+                _apagar(os.path.join(outdir, nome))
+            _apagar(status)
+        if proc.returncode and lido == inicio and not interrompido:
             erros.seek(0)
             raise RuntimeError(f"curl falhou (código {proc.returncode}): {erros.read().decode(errors='replace').strip()}")
     if interrompido:
@@ -653,8 +692,7 @@ def _rodar_ffmpeg(cmd, tmp, outdir):
         if proc.poll() is None:
             proc.kill()
             proc.wait()
-            if os.path.exists(tmp):
-                os.remove(tmp)
+            _apagar(tmp)
 
 
 def download_all(entries, outdir, links_only=False, ceder_vez=None, contexto=None):
@@ -733,7 +771,12 @@ def download_all(entries, outdir, links_only=False, ceder_vez=None, contexto=Non
         codigo = _rodar_ffmpeg(["ffmpeg", "-loglevel", "error", "-y", "-i", entry[1], "-c", "copy", tmp],
                                tmp, outdir)
         if codigo == 0:
-            _finalizar(entry, tmp, path)
+            try:
+                _finalizar(entry, tmp, path)
+            except PermissionError as ex:  # preso por outro programa: só este vídeo falha
+                _apagar(tmp)
+                progresso(f"erro (baixou, mas não deu para renomear o .part: {ex})", entry[1])
+                continue
             progresso("ok")
         else:
             progresso(f"erro (ffmpeg {codigo})", entry[1])

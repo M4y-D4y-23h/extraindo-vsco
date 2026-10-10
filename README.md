@@ -232,6 +232,14 @@ nova não puder ser criada (disco desconectado, caminho inválido), o script avi
 > Se um perfil foi interrompido pela metade (Ctrl+C, bloqueio) e você trocar a pasta antes de retomá-lo,
 > ele recomeça do zero na pasta nova: a retomada só enxerga os arquivos da pasta atual.
 
+**Pasta sincronizada (Google Drive, OneDrive, Dropbox)**: pode ser a pasta padrão (ex.:
+`python pasta_destino.py "G:\Meu Drive\VSCO"`); o programa de sincronização sobe as fotos sozinho.
+Cada foto é baixada como `.part` e renomeada quando termina. Se nesse instante o programa de
+sincronização (ou um antivírus) estiver com o arquivo aberto, o Windows recusa a troca de nome; o script
+tenta de novo por até ~5 segundos. Se continuar em uso, só aquela foto volta para a próxima rodada de
+tentativas (como um erro de rede) e, se falhar nas 3, vai para o `erros.log` com o motivo
+*baixou, mas não deu para renomear o .part*. A execução segue normalmente para as outras fotos.
+
 ### Limite de espaço em disco
 
 Para os downloads nunca encherem o disco, o espaço livre do disco **onde a pasta de destino está** é
