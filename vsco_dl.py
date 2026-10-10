@@ -24,10 +24,11 @@ Como o site funciona (e por que não precisamos rolar a página):
   6. Limite de espaço em disco (--espaco-minimo, padrão 2 GB; ver espaco_disco.py): o espaço livre
      do disco da pasta de destino é conferido antes e durante os downloads; abaixo do limite, o curl
      é encerrado, o arquivo pela metade é apagado e o script sai com código 4.
-  7. Pasta sincronizada (Google Drive, OneDrive, Dropbox) ou antivírus: cada foto baixa como .part e é
-     renomeada no fim. Se outro programa estiver com o arquivo aberto, renomear/apagar é tentado de novo
-     por até ~5 s (_em_uso); se continuar em uso, só aquela foto vai para a próxima rodada de tentativas
-     (e, falhando nas 3, para o erros.log). A execução nunca para por isso.
+  7. Pasta sincronizada (Google Drive, OneDrive, Dropbox): o curl grava os .part e o status do lote
+     numa pasta de trabalho no %TEMP% (_pasta_trabalho), e cada foto pronta vai na hora para o destino,
+     já com a data da foto. O programa de sincronização só vê fotos completas. Se o destino estiver preso
+     por outro programa, a foto pronta fica guardada e é tentada de novo sem segurar o download nem
+     baixar de novo (_Entrega); continuando presa por PRESO_MAX_S, vai para o erros.log.
 
 Cuidados com o firewall (Cloudflare) do VSCO:
   - Ritmo global (--rps): TODAS as requisições (página, API, fotos), de todas as threads e de todas
@@ -54,6 +55,8 @@ Pasta de destino: sem -o (ou com -o relativo) os arquivos vão para dentro da pa
   python pasta_destino.py "D:\\Fotos VSCO"   (ver pasta_destino.py)
 """
 import argparse
+import errno
+import itertools
 import json
 import os
 import re
@@ -89,7 +92,11 @@ SAIDA_SEM_ESPACO = espaco_disco.SAIDA_SEM_ESPACO  # 4: o disco de destino chegou
 dependencias.preparar_path()  # acha o curl/ffmpeg instalados pelo Painel.bat (ver dependencias.py)
 CURL = shutil.which("curl") or sys.exit("curl não encontrado no PATH.")
 COOKIE_JAR = os.path.join(tempfile.gettempdir(), f"vsco_cookies_{os.getpid()}.txt")
-STATUS_LOTE = ".curl_status.tmp"  # criado dentro da pasta de saída enquanto um lote baixa
+# Pasta de trabalho desta execução: o curl grava ali os .part e o status do lote (ver _pasta_trabalho).
+PASTA_TRABALHO = os.path.join(tempfile.gettempdir(), f"vsco_lote_{os.getpid()}")
+ESPACO_TRABALHO = espaco_disco.GB  # livre mínimo no disco da pasta temporária; abaixo, usa o destino
+PRESO_MAX_S = 30  # por quanto tempo um arquivo pronto, com o destino preso por outro programa, é tentado
+_LOTES = itertools.count()
 
 
 # ---------------------------------------------------------------- bloqueio do Cloudflare
@@ -531,42 +538,95 @@ def media_path(entry, outdir):
     return os.path.join(outdir, f"{date}_{mid}{ext}")
 
 
-def _em_uso(op, *args):
-    """op(*args) (renomear/apagar um arquivo), tentando de novo por até ~5 s enquanto o Windows disser
-    que o arquivo está em uso: numa pasta sincronizada (Google Drive, OneDrive, Dropbox) o programa de
-    sincronização abre cada arquivo novo para subir, e um antivírus faz o mesmo. Se continuar em uso,
-    levanta o PermissionError."""
-    for tentativa in range(25):
-        try:
-            return op(*args)
-        except PermissionError:
-            if tentativa == 24:
-                raise
-            time.sleep(0.2)
+def _pasta_trabalho(outdir):
+    """Onde o curl grava os .part e o arquivo de status: a pasta temporária do sistema, fora da pasta
+    de destino. Assim um programa de sincronização (Google Drive, OneDrive, Dropbox) só vê cada foto
+    pronta, nunca um arquivo pela metade nem o status que muda a cada foto. Se o disco da pasta
+    temporária tiver menos de ESPACO_TRABALHO livre, usa a própria pasta de destino (como antes)."""
+    try:
+        os.makedirs(PASTA_TRABALHO, exist_ok=True)
+        if shutil.disk_usage(PASTA_TRABALHO).free >= ESPACO_TRABALHO:
+            return PASTA_TRABALHO
+    except OSError:
+        pass
+    return outdir
 
 
 def _apagar(caminho):
-    """Apaga o arquivo, se existir. Nunca levanta por arquivo em uso: devolve False e ele fica na pasta
-    (um .part que sobra é sobrescrito no próximo download)."""
+    """Apaga o arquivo, se existir. Não espera nem levanta se ele estiver em uso: o que sobra na pasta
+    de trabalho sai no fim da execução, e um .part que sobra no destino é sobrescrito na próxima."""
     try:
-        _em_uso(os.remove, caminho)
-    except FileNotFoundError:
+        os.remove(caminho)
+    except OSError:
         pass
-    except PermissionError:
-        return False
-    return True
 
 
-def _finalizar(entry, tmp, path):
-    """Renomeia o .part pronto para o nome final e põe a data da foto no arquivo. Levanta
-    PermissionError se o .part continuar em uso por outro programa (ver _em_uso)."""
-    _em_uso(os.replace, tmp, path)
-    ts = entry[3]
-    if ts:
+def _mover(tmp, path):
+    """Põe o arquivo pronto `tmp` no destino `path`. No mesmo disco é só trocar o nome (instantâneo).
+    Em outro disco (ex.: %TEMP% no C: e destino no G: do Google Drive) copia para <path>.part e troca
+    o nome logo em seguida: uma foto pela metade nunca fica com o nome final (a retomada a pularia)."""
+    try:
+        os.replace(tmp, path)
+        return
+    except OSError as ex:
+        if ex.errno != errno.EXDEV:
+            raise
+    parcial = path + ".part"
+    try:
+        shutil.copy2(tmp, parcial)  # copy2 leva junto a data da foto
+        os.replace(parcial, path)
+    except BaseException:
+        _apagar(parcial)
+        raise
+    _apagar(tmp)
+
+
+class _Entrega:
+    """Leva cada arquivo pronto da pasta de trabalho para o destino e conta o "ok" no progresso.
+
+    Nunca segura o download: se o destino estiver preso por outro programa (o Google Drive subindo
+    um arquivo, um antivírus), o arquivo pronto fica guardado e é tentado de novo a cada volta do
+    laço do lote (tentar_presos), por até PRESO_MAX_S segundos, sem ser baixado de novo. Só no fim
+    do perfil (esperar) a execução aguarda os que ainda estiverem presos."""
+
+    def __init__(self, progresso):
+        self.progresso = progresso
+        self.presos = {}  # path -> (entry, tmp, desde)
+
+    def entregar(self, entry, tmp, path):
+        ts = entry[3]
+        if ts:  # antes de mover: a foto já chega ao destino com a data certa (o Drive sobe uma vez só)
+            try:
+                os.utime(tmp, (ts / 1000, ts / 1000))
+            except OSError:
+                pass
+        self._tentar(entry, tmp, path, time.monotonic())
+
+    def _tentar(self, entry, tmp, path, desde):
         try:
-            _em_uso(os.utime, path, (ts / 1000, ts / 1000))
-        except PermissionError:
-            pass  # a foto já está salva; só a data do arquivo fica a do download
+            _mover(tmp, path)
+        except PermissionError as ex:
+            if time.monotonic() - desde < PRESO_MAX_S:
+                self.presos[path] = (entry, tmp, desde)
+                return
+            erro = f"baixou, mas o destino continuou em uso por outro programa por {PRESO_MAX_S} s ({ex})"
+        except OSError as ex:
+            erro = f"baixou, mas não deu para gravar no destino ({ex})"
+        else:
+            self.progresso("ok")
+            return
+        _apagar(tmp)
+        self.progresso(f"erro ({erro})", entry[1])
+
+    def tentar_presos(self):
+        for path, (entry, tmp, desde) in list(self.presos.items()):
+            del self.presos[path]
+            self._tentar(entry, tmp, path, desde)
+
+    def esperar(self):
+        while self.presos:
+            time.sleep(0.2)
+            self.tentar_presos()
 
 
 def _checar_curl():
@@ -577,12 +637,14 @@ def _checar_curl():
         sys.exit(f"É preciso curl 8.3 ou mais novo (encontrado: {r.stdout.splitlines()[0] if r.stdout else CURL}).")
 
 
-def _baixar_fatia(fatia, outdir, progresso, motivos):
+def _baixar_fatia(fatia, outdir, trabalho, entrega, progresso, motivos):
     """Baixa `fatia` [(entry, path)] com UM processo curl: em série, na mesma conexão, no ritmo do
-    RITMO (vagas já reservadas por quem chama). O resultado de cada arquivo é lido ao vivo, então um
-    bloqueio (aqui, em outra thread ou em outra linha) mata o curl na hora. O espaço livre do disco
-    também é conferido a cada volta: abaixo do limite (espaco_disco), o curl é encerrado e sai SemEspaco.
-    Um lote maior que PAGE_SIZE também é interrompido quando outra linha de execução pede vez.
+    RITMO (vagas já reservadas por quem chama). O curl grava em `trabalho` (ver _pasta_trabalho) e
+    cada arquivo pronto vai na hora para o destino (`entrega`). O resultado de cada arquivo é lido ao
+    vivo, então um bloqueio (aqui, em outra thread ou em outra linha) mata o curl na hora. O espaço
+    livre do disco de `outdir` também é conferido a cada volta: abaixo do limite (espaco_disco), o curl
+    é encerrado e sai SemEspaco. Um lote maior que PAGE_SIZE também é interrompido quando outra linha
+    de execução pede vez.
 
     Devolve (retentar, repetir): `retentar` são falhas transitórias, para outra rodada com espera
     (o motivo de cada uma fica em `motivos[path]`, para o log de erros); `repetir` são os itens
@@ -590,16 +652,14 @@ def _baixar_fatia(fatia, outdir, progresso, motivos):
     logo em seguida."""
     por_nome = {os.path.basename(path) + ".part": (entry, path) for entry, path in fatia}
     config = "".join(f'url = "{entry[1]}"\noutput = "{nome}"\n' for nome, (entry, _) in por_nome.items())
-    status = os.path.join(outdir, STATUS_LOTE)
-    inicio = 0
-    if not _apagar(status):  # sobrou de um lote anterior e continua em uso: lê só o que este lote acrescentar
-        inicio = os.path.getsize(status)
+    nome_status = f".curl_status_{os.getpid()}_{next(_LOTES)}.tmp"  # um por lote: nunca sobra linha de outro
+    status = os.path.join(trabalho, nome_status)
     # %output{>>arq} grava e fecha o arquivo a cada transferência (stdout/stderr em pipe só chegam no fim)
     cmd = [CURL, "-sS", "-L", "--max-time", "120", "-A", UA, *RITMO.opcao_curl(), "-K", "-",
-           "-w", f"%output{{>>{STATUS_LOTE}}}%{{filename_effective}}\t%{{http_code}}\t%{{exitcode}}\n"]
-    retentar, repetir, lido, resto, interrompido = [], [], inicio, b"", False
+           "-w", f"%output{{>>{nome_status}}}%{{filename_effective}}\t%{{http_code}}\t%{{exitcode}}\n"]
+    retentar, repetir, lido, resto, interrompido = [], [], 0, b"", False
     with tempfile.TemporaryFile() as erros:  # arquivo, não pipe: um pipe cheio travaria o curl
-        proc = subprocess.Popen(cmd, cwd=outdir, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=erros)
+        proc = subprocess.Popen(cmd, cwd=trabalho, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=erros)
         try:
             proc.stdin.write(config.encode())
             proc.stdin.close()
@@ -614,17 +674,10 @@ def _baixar_fatia(fatia, outdir, progresso, motivos):
                     for linha in linhas:
                         nome, code, exitcode = linha.decode(errors="replace").strip().split("\t")
                         entry, path = por_nome.pop(nome)
-                        tmp = os.path.join(outdir, nome)
+                        tmp = os.path.join(trabalho, nome)
                         if code == "200" and exitcode == "0":
                             checar_resposta(code)
-                            try:
-                                _finalizar(entry, tmp, path)
-                            except PermissionError as ex:  # .part preso por outro programa: só esta foto
-                                _apagar(tmp)                # volta para a próxima rodada
-                                motivos[path] = f"baixou, mas não deu para renomear o .part ({ex})"
-                                retentar.append((entry, path))
-                                continue
-                            progresso("ok")
+                            entrega.entregar(entry, tmp, path)
                             continue
                         corpo = b""
                         if os.path.exists(tmp):
@@ -646,6 +699,7 @@ def _baixar_fatia(fatia, outdir, progresso, motivos):
                         if negada:
                             interrompido = True  # o resto da fatia volta para a fila
                             break
+                entrega.tentar_presos()
                 if interrompido or terminou:
                     break
                 # disco no limite: SemEspaco; o finally encerra o curl e apaga só o arquivo pela metade
@@ -666,9 +720,9 @@ def _baixar_fatia(fatia, outdir, progresso, motivos):
                 proc.kill()
                 proc.wait()
             for nome in por_nome:  # o que estava em andamento quando o curl foi interrompido
-                _apagar(os.path.join(outdir, nome))
+                _apagar(os.path.join(trabalho, nome))
             _apagar(status)
-        if proc.returncode and lido == inicio and not interrompido:
+        if proc.returncode and not lido and not interrompido:
             erros.seek(0)
             raise RuntimeError(f"curl falhou (código {proc.returncode}): {erros.read().decode(errors='replace').strip()}")
     if interrompido:
@@ -714,7 +768,10 @@ def download_all(entries, outdir, links_only=False, ceder_vez=None, contexto=Non
 
     alvos = [(e, media_path(e, outdir)) for e in entries]
     skipped = len(alvos)
-    alvos = [(e, p) for e, p in alvos if not (os.path.exists(p) and os.path.getsize(p) > 0)]
+    # uma leitura da pasta em vez de uma consulta por foto (no G: do Google Drive cada consulta é lenta)
+    with os.scandir(outdir) as it:
+        existentes = {a.name for a in it if a.is_file() and a.stat().st_size > 0}
+    alvos = [(e, p) for e, p in alvos if os.path.basename(p) not in existentes]
     skipped -= len(alvos)
     if alvos:
         estimativa = f", tempo estimado {RITMO.estimar(len(alvos))}" if RITMO.rps else ""
@@ -736,6 +793,8 @@ def download_all(entries, outdir, links_only=False, ceder_vez=None, contexto=Non
 
     hls = [a for a in alvos if a[0][4]]
     diretos = [a for a in alvos if not a[0][4]]
+    trabalho = _pasta_trabalho(outdir) if alvos else outdir
+    entrega = _Entrega(progresso)
     if diretos:
         _checar_curl()
     for rodada in range(3):  # erros de rede/5xx voltam para uma nova rodada, com espera crescente
@@ -751,7 +810,7 @@ def download_all(entries, outdir, links_only=False, ceder_vez=None, contexto=Non
             fatia, pendentes = pendentes[:n], pendentes[n:]
             espaco_disco.checar(outdir)
             fim = RITMO.reservar(len(fatia))  # durante uma pausa de bloqueio, espera aqui
-            retentar, repetir = _baixar_fatia(fatia, outdir, progresso, motivos)
+            retentar, repetir = _baixar_fatia(fatia, outdir, trabalho, entrega, progresso, motivos)
             if repetir:
                 RITMO.liberar(fim)  # o curl foi interrompido: as vagas que sobraram voltam
                 if coordenacao.outra_esperando():
@@ -767,19 +826,14 @@ def download_all(entries, outdir, links_only=False, ceder_vez=None, contexto=Non
             continue
         espaco_disco.checar(outdir)
         RITMO.reservar()
-        tmp = path + ".part.mp4"
+        tmp = os.path.join(trabalho, os.path.basename(path) + ".part.mp4")
         codigo = _rodar_ffmpeg(["ffmpeg", "-loglevel", "error", "-y", "-i", entry[1], "-c", "copy", tmp],
                                tmp, outdir)
         if codigo == 0:
-            try:
-                _finalizar(entry, tmp, path)
-            except PermissionError as ex:  # preso por outro programa: só este vídeo falha
-                _apagar(tmp)
-                progresso(f"erro (baixou, mas não deu para renomear o .part: {ex})", entry[1])
-                continue
-            progresso("ok")
+            entrega.entregar(entry, tmp, path)
         else:
             progresso(f"erro (ffmpeg {codigo})", entry[1])
+    entrega.esperar()  # só os que ainda estão presos por outro programa (normalmente nenhum)
     if alvos:
         print(file=sys.stderr)
     if falhas:
@@ -879,6 +933,7 @@ def cleanup():
     coordenacao.sair()  # solta as vagas e os perfis desta linha (encerrada à força, eles expiram sozinhos)
     if os.path.exists(COOKIE_JAR):
         os.remove(COOKIE_JAR)
+    shutil.rmtree(PASTA_TRABALHO, ignore_errors=True)
 
 
 def rodar(main_fn):

@@ -233,12 +233,19 @@ nova não puder ser criada (disco desconectado, caminho inválido), o script avi
 > ele recomeça do zero na pasta nova: a retomada só enxerga os arquivos da pasta atual.
 
 **Pasta sincronizada (Google Drive, OneDrive, Dropbox)**: pode ser a pasta padrão (ex.:
-`python pasta_destino.py "G:\Meu Drive\VSCO"`); o programa de sincronização sobe as fotos sozinho.
-Cada foto é baixada como `.part` e renomeada quando termina. Se nesse instante o programa de
-sincronização (ou um antivírus) estiver com o arquivo aberto, o Windows recusa a troca de nome; o script
-tenta de novo por até ~5 segundos. Se continuar em uso, só aquela foto volta para a próxima rodada de
-tentativas (como um erro de rede) e, se falhar nas 3, vai para o `erros.log` com o motivo
-*baixou, mas não deu para renomear o .part*. A execução segue normalmente para as outras fotos.
+`python pasta_destino.py "G:\Meu Drive\VSCO"`); o programa de sincronização sobe as fotos sozinho, sem
+deixar o download mais lento:
+
+- os arquivos pela metade (`.part`) e o status do lote ficam numa pasta de trabalho na pasta temporária
+  do Windows (`%TEMP%\vsco_lote_<número>`, apagada no fim). Na pasta de destino só aparece cada foto
+  **pronta**, já com a data da foto, então o Drive sobe cada uma uma vez só. Se o disco da pasta
+  temporária tiver menos de 1 GB livre, os `.part` vão para a própria pasta de destino, como antes;
+- se o Drive (ou um antivírus) estiver com o destino aberto bem na hora, a foto pronta fica guardada e é
+  tentada de novo em segundo plano, enquanto as outras continuam baixando: nada espera e nada é
+  baixado de novo. Se continuar presa por 30 s, só aquela foto vai para o `erros.log` (*o destino
+  continuou em uso por outro programa*);
+- conferir quais fotos já existem é uma leitura só da pasta, e não uma consulta por foto (no `G:` do
+  Google Drive cada consulta é lenta).
 
 ### Limite de espaço em disco
 
